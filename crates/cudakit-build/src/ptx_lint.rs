@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use color_eyre::eyre::{Result, bail};
+use eyre::{Result, bail};
 
 /// Fails when a generic shared address reaches a narrowing conversion without
 /// `cvta.to.shared`, following values within each PTX function

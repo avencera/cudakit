@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use color_eyre::eyre::{Context, Result};
+use eyre::{Context, Result};
 
 use crate::{Project, Tier};
 

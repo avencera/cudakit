@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use color_eyre::eyre::{Result, bail, eyre};
+use eyre::{Result, bail, eyre};
 
 use crate::{CubinArch, Project, Tier};
 

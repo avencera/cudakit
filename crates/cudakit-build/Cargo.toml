@@ -9,6 +9,6 @@ description = "Kernel toolchain for cudakit consumers: builds cuda-oxide kernels
 publish = false
 
 [dependencies]
-color-eyre = "0.6"
+eyre = "0.6"
 sha2 = "0.10"
 tempfile = "3"

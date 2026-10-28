@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use color_eyre::eyre::{Result, bail, eyre};
+use eyre::{Result, bail, eyre};
 
 /// Kernel entry points of a PTX module: each `.entry` name with its parameter
 /// declarations, minus the parameter names

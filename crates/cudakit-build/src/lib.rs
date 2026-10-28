@@ -21,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use color_eyre::eyre::{Context, Result, bail, eyre};
+use eyre::{Context, Result, bail, eyre};
 use sha2::{Digest, Sha256};
 
 use crate::entry_points::{entry_point_differences, entry_points};
