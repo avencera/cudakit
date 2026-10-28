@@ -52,7 +52,7 @@ let linear = cudakit::Sgemm { b_transposed: true, ..cudakit::Sgemm::new(m, n, k)
 runtime.sgemm(linear, &x, &w, &mut y)?;
 ```
 
-The [guide](https://github.com/avencera/cudakit/blob/main/docs/guide.md) covers the
+The [guide](https://github.com/avencera/cudakit/blob/master/docs/guide.md) covers the
 whole setup: the profile, kernel areas, threads, graphs and the kernel toolchain.
 
 ## Features
@@ -95,7 +95,7 @@ cargo test --workspace --all-features
 CUDAKIT_REQUIRE_GPU=1 cargo test -p cudakit --features "libraries test-support" --tests
 ```
 
-See [`docs/design.md`](https://github.com/avencera/cudakit/blob/main/docs/design.md)
+See [`docs/design.md`](https://github.com/avencera/cudakit/blob/master/docs/design.md)
 for the design.
 
 ## License

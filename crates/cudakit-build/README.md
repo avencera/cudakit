@@ -55,7 +55,7 @@ PROJECT.build(&workspace_root, &[])?;
 
 Write the pins out in full rather than using `Pins::CURRENT`, so a toolchain default
 bump never makes your committed artifacts stale. The
-[guide](https://github.com/avencera/cudakit/blob/main/docs/guide.md#kernel-toolchain)
+[guide](https://github.com/avencera/cudakit/blob/master/docs/guide.md#kernel-toolchain)
 covers the details, and the repository's `scripts/setup-gpu-box.sh` prepares an Ubuntu
 24.04 NVIDIA box with the same pins.
 

@@ -17,7 +17,7 @@
 //! - [`identity`] reads the driver release for persisted tuning identities
 //!
 //! Kernels are written with cuda-oxide in each consumer's own kernels crate and built
-//! offline by `cudakit-build`; see the [guide](https://github.com/avencera/cudakit/blob/main/docs/guide.md)
+//! offline by `cudakit-build`; see the [guide](https://github.com/avencera/cudakit/blob/master/docs/guide.md)
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
