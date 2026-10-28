@@ -36,3 +36,7 @@ jobs:
       - run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
+      # links to feature-gated items must not break the default-feature docs
+      - run: cargo doc -p cudakit --no-default-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

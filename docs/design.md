@@ -1,7 +1,7 @@
 # cudakit design
 
 cudakit is the CUDA host stack shared by speakrs (diarization) and scriptrs (Parakeet
-ASR). It was extracted from speakrs 0.7.0 (`src/inference/cuda`, `xtask/src/commands/cuda_kernels`).
+ASR). It started as the CUDA layer of speakrs 0.7.0.
 
 The property every change must keep: **a build needs no CUDA toolkit, and a process
 loads only the NVIDIA driver (`libcuda`) plus, when a consumer allows it, cuBLAS,
@@ -25,27 +25,12 @@ Consumers keep, and cudakit never sees:
 - their model code, plan selection, recipes, tuning and tune-file format
 - environment variables: cudakit reads none; consumers read theirs and pass values in
 
-### What moved out of speakrs
+### What stays in consumers
 
-| speakrs 0.7.0 | cudakit |
-| --- | --- |
-| `libraries.rs` (preflight, `OnceLock` handles, TF32 mode lock) | `libraries` (feature `libraries`) |
-| `runtime.rs` context, stream, device checks, module cache, cooperative capacity | `Gpu`, `Runtime<K>` |
-| `device.rs` `DeviceAttributes` | `DeviceAttributes` |
-| `tier.rs` `ComputeCapability`, `PtxTier` | same names; consumer-specific parts move to `Profile` |
-| `kernels.rs` hashes, embedded PTX/cubins, `ModuleRequest`, `load_artifact`, `tier_ptx!` | `artifact`, `embed_tier!` |
-| `buffer.rs` `DeviceTensor`, `unfold_windows` | same |
-| `gemm.rs` + `blas.rs` `Sgemm` | `Sgemm`, plus `SgemmBatched` (new, for scriptrs) |
-| `segmentation/graph.rs`, `embedding.rs` and `tuning.rs` capture code | one `Gpu::capture` and `Graph` |
-| `dnn/library.rs` conv planner, `geometry.rs` `Conv2d`/`Residual` | `dnn` (feature `libraries`) |
-| `tuning/driver_version.rs` | `identity::DriverIdentity` (serde behind feature `serde`) |
-| `error.rs` generic variants | `cudakit::Error` |
-| xtask `cuda_kernels.rs` + `ptx_lint.rs` | `cudakit-build` |
-
-Stays in speakrs: `KernelModule`, `BoundaryId`, recipes, `candidate/`, `implementation/`,
-tuning catalogue and tune-file format, the speakrs policy docs on `CudaMath` and public options, `CudaSession`
-(its log lines name speakrs policy), the weights adapter over speakrs's shared
-safetensors decoder, and every kernel.
+Everything specific to one application: its kernel-area enum, kernel selection and
+binding policy, tuning catalogue and tune-file format, model code and weights format,
+its public options and error types, and every kernel. cudakit's types carry no
+consumer policy beyond the `Profile`.
 
 ## Public API
 
@@ -82,8 +67,7 @@ adds the module cache:
 - `runtime.load_embedded(area)` does both
 - `LoadedKernels::function(name)` looks up an entry point
 
-Errors are one `cudakit::Error` enum. speakrs maps it onto its existing `CudaError`
-variants, so speakrs's public error type keeps its shape.
+Errors are one `cudakit::Error` enum, which consumers map onto their own error types.
 
 ### Driver-only policy
 
@@ -94,7 +78,7 @@ decides whether that code exists. Policy is per consumer, not per Cargo feature,
 binary that links both speakrs (driver-only) and scriptrs (cuBLAS) cannot make speakrs
 load cuBLAS through feature unification.
 
-Library loading keeps the speakrs preflight: before cudarc touches a library, cudakit
+Library loading runs a preflight: before cudarc touches a library, cudakit
 opens the same file cudarc would pick and checks every symbol cudakit's wrappers or the
 consumer's `extra_symbols` call. A missing symbol is `Error::LibraryUnavailable`, never
 a panic inside cudarc, and never a silent fall-through to another version.
@@ -112,7 +96,7 @@ A consumer:
 2. Writes two `const fn` lookups, `shipped_ptx` and `shipped_cubin`, that chain its
    enabled tier crates, and a one-line local `tier_ptx!` wrapper over
    `cudakit::embed_tier!`. Lookups must stay in const context: a run-time call links
-   every file of every enabled tier crate into the binary (fixed in speakrs 0.7.0).
+   every file of every enabled tier crate into the binary.
 3. Implements `KernelArea` for its area enum with `variants()` built from `tier_ptx!`
    calls and marked `#[inline(never)]` so codegen units do not each copy the bytes.
 4. Declares a const `cudakit_build::Project` in its xtask and forwards its subcommands to
@@ -123,16 +107,16 @@ A consumer:
 `unsafe fn Gpu::capture(enqueue) -> Result<Option<Graph>, E>` with
 `E: From<cudakit::Error>`. It is `unsafe` because the graph keeps raw pointers to the
 captured buffers, and nothing in the types ties them to `Graph::launch`: the caller
-guarantees every launch finds them allocated in place. Dropping a graph only destroys
-its driver handles, so a consumer may keep a stale graph that can no longer be launched
-(speakrs's embedding storage does this with a generation token). It synchronizes the
+guarantees every launch finds them allocated in place, and that until a queued replay
+finishes its buffers stay on the GPU's stream, since replays record no cudarc events.
+Dropping a graph only destroys its driver handles, so a consumer may keep a stale graph
+that can no longer be launched (for example behind a generation token). It synchronizes the
 stream, pauses cudarc event tracking (required, or capture fails with
 `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`), captures thread-locally, ends the capture even
 when `enqueue` returns an error (a panic unwinds without ending it), and restores
 tracking. The driver ends an empty capture with a zero-node graph rather than none, so
 `capture` counts nodes and returns `None` for empty work; `capture_nonempty` makes that
-`Error::EmptyCapture`. `Graph::launch` replays on the same stream. This replaces three
-copies in speakrs. `Graph::as_cuda` exposes the cudarc graph for consumers that add
+`Error::EmptyCapture`. `Graph::launch` replays on the same stream. `Graph::as_cuda` exposes the cudarc graph for consumers that add
 conditional nodes later.
 
 ## Kernel toolchain: library, not a copied script
@@ -151,7 +135,8 @@ tier-crate rendering, host embed-mask check). The consumer's `Project` supplies:
 
 The pins stay per consumer on purpose: speakrs kernels must not rebuild because scriptrs
 moved to a newer cuda-oxide. `cudakit-build` provides defaults for the current pins.
-`scripts/setup-gpu-box.sh` (CUDA 13, LLVM 21, nightly, cuda-oxide) moves here.
+`scripts/setup-gpu-box.sh` installs that toolchain (CUDA 13, LLVM 21, the nightly,
+cuda-oxide) on a GPU box.
 
 ## Workspace layout and features
 
@@ -165,7 +150,7 @@ cudakit/
   docs/guide.md
 ```
 
-`cudakit` features, mirroring speakrs's `_cuda` / `_cuda-libraries` split:
+`cudakit` features:
 
 | Feature | Adds |
 | --- | --- |
@@ -181,25 +166,25 @@ and CoreML builds stay free of cudarc.
 
 - Policy (driver-only) is a runtime `Profile` value, not a cudakit Cargo feature, for the
   feature-unification reason above.
-- `CudaMath` becomes a documented re-export of `cudakit::Math`, which is exhaustive:
-  speakrs persists the mode in tuning keys and matches it across the crate boundary,
-  which a `#[non_exhaustive]` foreign enum forbids. A separate speakrs enum would need
-  conversions at about 30 geometry sites that also read the mode back. speakrs's
-  `CudaMath` loses `#[non_exhaustive]` (a semver-compatible relaxation; adding a mode
-  later is breaking). `ComputeCapability`, `PtxTier` and `CudaLibrary` become
-  re-exports and stay `#[non_exhaustive]`;
-  `PtxTier::{feature, compiled_in, is_compiled_in, select, native, from_env, SHIPPED}`
-  move to speakrs-side helpers because they encode speakrs features and env vars. That
-  is a public API change for speakrs.
-- The tune file stays in speakrs; only the driver release reader moves.
+- `Math` is exhaustive: consumers persist the mode in tuning keys and match it across
+  the crate boundary, which a `#[non_exhaustive]` foreign enum forbids. Adding a mode is
+  therefore a breaking change. `ComputeCapability`, `PtxTier` and `Library` stay
+  `#[non_exhaustive]`.
+- Tier helpers that encode one application's Cargo features or environment variables
+  (choosing a tier from an env var, mapping tiers to feature names beyond the
+  `Profile`) stay in that application.
+- Tune files stay in consumers; cudakit provides only the driver release they key on.
+- The cuBLAS handle is shared with cudakit's GEMMs, which pass host scalars in the math
+  mode they lock, so raw access is `unsafe fn Gpu::blas(math)`: the caller must leave
+  pointer mode, math mode, stream and workspace alone. cudarc's event-tracking pause
+  stays private, because buffers allocated during it never get events.
 - `Gpu` and `Runtime<K>` are `Send + Sync`, so a model can move to a worker thread or
   sit behind a mutex. cudarc's `Cudnn` is `!Send + !Sync` and cuDNN forbids
   one handle on two threads at once, while cudarc's descriptors each keep a clone of it.
   Rather than one handle per planner (an extra `cudnnCreate` per conv plan), the
   shared handle is thread-affine:
   `Gpu::dnn` returns it only on the thread that prepared cuDNN, so its `!Send` clones
-  never leave that thread. speakrs prepares and uses cuDNN on one worker thread, so its
-  behavior is unchanged. `Graph` is `Send` only, since CUDA forbids launching one
+  never leave that thread. `Graph` is `Send` only, since CUDA forbids launching one
   executable graph from two threads at once. A context is current per thread, and
   cudarc binds it for allocations, copies, launches and graphs but not for cuBLAS,
   cuDNN, function lookup or occupancy queries, so cudakit binds before each of those
