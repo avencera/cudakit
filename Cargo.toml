@@ -8,6 +8,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/avencera/cudakit"
 authors = ["Praveen Perera"]
+homepage = "https://github.com/avencera/cudakit"
 
 [workspace.dependencies]
 cudarc = { version = "0.19.10", default-features = false, features = [
@@ -19,3 +20,6 @@ cudarc = { version = "0.19.10", default-features = false, features = [
     # the 12.4 API floor keeps CUDA 12.4 drivers working; PTX is JIT-compiled by the driver
     "cuda-12040",
 ] }
+
+[workspace.lints.rust]
+missing_docs = "warn"

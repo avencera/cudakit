@@ -5,8 +5,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage.workspace = true
 description = "Driver-only CUDA host stack: context, stream, embedded PTX/cubin modules, buffers, GEMM and graph capture, without libcudart"
-publish = false
+readme = "README.md"
+documentation = "https://docs.rs/cudakit"
+keywords = ["cuda", "gpu", "nvidia", "cublas", "cudnn"]
+categories = ["api-bindings", "hardware-support", "science"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
@@ -36,3 +44,6 @@ required-features = ["libraries", "test-support"]
 [[test]]
 name = "driver_only"
 required-features = ["test-support"]
+
+[lints]
+workspace = true

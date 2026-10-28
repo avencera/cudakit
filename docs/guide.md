@@ -1,48 +1,34 @@
-# cudakit handoff
+# Using cudakit
 
-For consumers adopting cudakit; scriptrs is the first new one. See `docs/design.md` for
-why things are shaped this way.
+This guide walks through adopting cudakit in an application that ships its own CUDA
+kernels. [speakrs](https://github.com/avencera/speakrs) is a complete example: see its
+`src/inference/cuda` and `xtask`. `docs/design.md` explains why things are shaped this
+way.
 
-## Stability
-
-| Part | Status |
-| --- | --- |
-| `Gpu`, `Runtime<K>`, `Options`, `Profile`, `LibraryPolicy`, `ExtraSymbols` | Stable for consumers. speakrs runs on it |
-| `KernelArea`, `AreaPtx`, `EmbeddedPtx`, `EmbeddedCubin`, `embed_tier!`, `ModuleRequest`, `LoadedKernels` | Stable. speakrs's module registry is built on it. `LoadedKernels::from_module` took a context argument after `a2b1ddd` |
-| `DeviceTensor`, `unfold_windows` | Stable |
-| `Sgemm`, `Gpu::sgemm` | Stable. Moved unchanged from speakrs |
-| `SgemmBatched`, `Gpu::sgemm_batched` | New. Covered by GPU tests in `crates/cudakit/tests/gpu.rs`, but no production consumer yet |
-| `Gpu::capture`, `capture_nonempty`, `Graph` | Stable. All three speakrs capture sites use them. Capture became `unsafe` after `0a36e85` |
-| `dnn::{ConvPlanner, ConvPlan, Residual}`, `Conv2d` | Stable. speakrs's convolution fallback |
-| `identity::{DriverIdentity, DriverRelease}` | Stable |
-| `Error` | `#[non_exhaustive]`. New variants may appear (`LibraryOnAnotherThread` was added after `a2b1ddd`) |
-| `cudakit-build` (`Project`, `Area`, `Tier`, `Pins`, `TierCrate`, `CubinArch`) | Usable. speakrs's `cargo xtask cuda-kernels` runs on it and its committed artifacts check unchanged. Not published |
-
-`Math` is exhaustive on purpose. Consumers persist it, so adding a variant is a
-breaking change.
-
-## Consumer recipe
-
-### 1. Dependency and features
+## 1. Dependency and features
 
 ```toml
 [features]
-cuda = ["dep:cudakit", "cudakit/libraries"]   # library-first build
+cuda = ["dep:cudakit", "cudakit/libraries"]         # library-first build
 cuda-sm75 = ["dep:cudakit", "dep:myapp-ptx-sm75"]   # one per tier you ship
 
 [dependencies]
-cudakit = { path = "../cudakit/crates/cudakit", optional = true }
+cudakit = { version = "0.1", optional = true }
 ```
 
-Enable cudakit only from CUDA features, so CPU and CoreML builds never compile cudarc.
+Enable cudakit only from your CUDA features, so CPU builds never compile cudarc.
 
-### 2. Profile
+## 2. Profile
+
+A `Profile` is your build policy: the tiers this build compiled in, the tiers you ship
+production kernels for, the Cargo feature behind each tier (for error messages), and
+whether cuBLAS and cuDNN may load.
 
 ```rust
 use cudakit::{ExtraSymbols, LibraryPolicy, Profile, PtxTier, TierSet};
 
 pub static PROFILE: Profile = Profile {
-    consumer: "scriptrs",
+    consumer: "myapp",
     compiled: TierSet::EMPTY
         .with_if(PtxTier::Sm75, cfg!(feature = "cuda-sm75"))
         .with_if(PtxTier::Sm80, cfg!(feature = "cuda-sm80"))
@@ -55,11 +41,17 @@ pub static PROFILE: Profile = Profile {
 };
 ```
 
+`LibraryPolicy::DriverOnly` refuses every cuBLAS, cuDNN and NVRTC request before
+anything is looked up, even when another crate in the binary enabled the `libraries`
+feature.
+
 If you call cuBLAS or cuDNN entry points directly, beyond cudakit's wrappers, list them
 in `extra_symbols`. The preflight then rejects a library that lacks them before cudarc
-loads it. speakrs, for example, lists the cuDNN RNN API.
+loads it.
 
-### 3. Kernel areas
+## 3. Kernel areas
+
+A kernel area is one PTX module. Your area enum says which variants this build embeds:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,11 +80,11 @@ impl cudakit::KernelArea for KernelModule {
 ```
 
 `shipped_ptx` and `shipped_cubin` are your own `const fn(&str)` lookups over your
-`<app>-ptx-<tier>` crates. speakrs's `src/inference/cuda/kernels.rs` is the model to
-copy. Keep the lookups in const context: a run-time call links every shipped file into
-the binary.
+`<app>-ptx-<tier>` crates, which `cudakit-build` generates. Keep the lookups in const
+context: a run-time call links every shipped file into the binary. `#[inline(never)]`
+stops each codegen unit from copying the embedded bytes.
 
-### 4. Open, prepare, load
+## 4. Open, prepare, load
 
 ```rust
 let runtime = cudakit::Runtime::<KernelModule>::open(0, cudakit::Options::default())?;
@@ -103,12 +95,16 @@ let softmax = kernels.function("softmax_rows")?;      // PTX entry name = Rust f
 
 `Runtime` dereferences to `Gpu`, so `runtime.stream()`, `runtime.sgemm(..)` and
 `runtime.capture(..)` all work directly on it. Everything it issues runs in order on
-its one stream.
+its one stream. `load_embedded` picks the exact cubin for the device when you ship one,
+otherwise the PTX for the driver to JIT, and never silently substitutes another
+artifact.
+
+### Threads
 
 `Runtime` and `Gpu` are `Send + Sync`, so a loaded model can move to a worker thread or
-sit behind an `Arc<Mutex<..>>`. `Graph` is `Send` but not `Sync`. cudakit binds the
-GPU's context on whichever thread calls it, so a fresh worker needs no setup. Two
-limits:
+sit behind an `Arc<Mutex<..>>`. `Graph` is `Send` but not `Sync`. cudakit makes the
+GPU's context current on whichever thread calls it, so a fresh worker needs no setup.
+Two limits:
 
 - Capture needs the GPU to itself: the stream records whatever any thread queues
   during the capture, so serialize capture against other work on the same `Runtime`
@@ -116,7 +112,7 @@ limits:
   `Error::LibraryOnAnotherThread` elsewhere, and `dnn::ConvPlan`s stay on that thread
   (they are `!Send`). cuBLAS has no such limit
 
-### 5. GEMMs
+## 5. GEMMs
 
 ```rust
 use cudakit::{Math, Sgemm, SgemmBatched};
@@ -130,10 +126,12 @@ let scores = SgemmBatched::packed(Sgemm { b_transposed: true, ..Sgemm::new(t, t,
 runtime.sgemm_batched(scores, &q, &k, &mut s)?;
 ```
 
-A stride of 0 on `a` or `b` reuses one operand for every item. Output strides must not
-overlap.
+Products are row-major. Each buffer must hold exactly its matrix, and cudakit checks the
+lengths. In a batch, a stride of 0 on `a` or `b` reuses one operand for every item, and
+output strides must not overlap. `Math` is exhaustive, so you can persist it in tuning
+keys and match it.
 
-### 6. Graphs
+## 6. Graphs
 
 ```rust
 // buffers allocated once; run eagerly first so cuBLAS finishes lazy setup
@@ -156,39 +154,40 @@ launched may outlive its buffers. If you reallocate buffers, drop or recapture e
 graph that recorded them before its next launch. `capture` returns `None` when the
 closure queued nothing, and a panic inside the closure leaves the stream capturing.
 
-## What scriptrs should call (Phase 3)
+`Graph::as_cuda` exposes the cudarc graph if you need conditional nodes.
 
-- Model load: `Runtime::open`, `prepare(Library::Cublas)`, `DeviceTensor::upload` for
-  the weights, `load_embedded` for each kernel area
-- Encoder: `Sgemm` for the projections and feed-forward layers, `SgemmBatched` for the
-  attention products, your own kernels for softmax, norms and activations, then one
-  `capture_nonempty` per fixed chunk shape
-- TDT decode: capture one decode step (predictor, joint, argmax, duration advance)
-  that reads and writes its control state in device buffers, and replay it with
-  `Graph::launch` without host syncs. `Graph::as_cuda` exposes the cudarc graph if you
-  later need conditional nodes
-- Errors: `impl From<cudakit::Error> for YourError`. `Error::is_device_unavailable`
-  separates a missing GPU or driver from a broken install
+## 7. Convolutions
+
+With the `libraries` feature, `dnn::ConvPlanner` picks a cuDNN forward algorithm from
+cuDNN's own ranking, without timing runs, so the same GPU, cuDNN version and shape
+always get the same algorithm. `ConvPlan::forward_bias_relu` fuses bias, an optional
+residual and ReLU into the convolution.
+
+## 8. Errors
+
+`impl From<cudakit::Error> for YourError`. `Error::is_device_unavailable` separates a
+missing GPU or driver from a broken install. `Error` is `#[non_exhaustive]`.
 
 ## Kernel toolchain
 
-`cudakit-build` is the speakrs toolchain as a library. Your xtask declares one const
-`Project` and forwards its subcommands:
+`cudakit-build` builds your cuda-oxide kernels crate to PTX, pins cubins with ptxas,
+generates your tier crates and checks the committed artifacts. Your xtask declares one
+const `Project` and forwards its subcommands:
 
 ```rust
 use cudakit_build::{Area, CubinArch, Pins, Project, Tier, TierCrate};
 
 const PROJECT: Project = Project {
-    name: "scriptrs",
+    name: "myapp",
     command: "cargo xtask cuda-kernels",
-    kernel_crate: "crates/scriptrs-cuda-kernels",
-    kernel_package: "scriptrs-cuda-kernels",
+    kernel_crate: "crates/myapp-cuda-kernels",
+    kernel_package: "myapp-cuda-kernels",
     manifest_dir: "src/cuda/ptx",
     host_kernels: "src/cuda/kernels.rs",
     host_feature: "cuda-{tier}",
     tier_crate: TierCrate {
-        path: "crates/scriptrs-ptx-{tier}",
-        description: "Prebuilt {tier} tier CUDA kernels for scriptrs",
+        path: "crates/myapp-ptx-{tier}",
+        description: "Prebuilt {tier} tier CUDA kernels for myapp",
         example_area: "encoder",
     },
     areas: &[Area::new("encoder", &[Tier::Sm75]), Area::new("decode", &[Tier::Sm75])],
@@ -205,7 +204,7 @@ const PROJECT: Project = Project {
     ],
 };
 
-// `build` (PTX + cubins) and `build-cubins` need the GPU box; `check` runs anywhere
+// `build` (PTX + cubins) and `build_cubins` need a GPU box; `check` runs anywhere
 PROJECT.check(&workspace_root, false)?;
 ```
 
@@ -222,4 +221,5 @@ PROJECT.check(&workspace_root, false)?;
   (`($($variant:tt)*) => { cudakit::embed_tier!(..; $($variant)*) }`)
 - `ptx_lint` is public for consumers that lint PTX outside `check`
 
-`scripts/setup-gpu-box.sh --probe <kernel-crate>` prepares the box with the same pins.
+`scripts/setup-gpu-box.sh --probe <kernel-crate>` prepares an Ubuntu 24.04 NVIDIA box
+with the same pins.

@@ -5,10 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage.workspace = true
 description = "Kernel toolchain for cudakit consumers: builds cuda-oxide kernels to PTX, pins cubins and checks committed artifacts"
-publish = false
+readme = "README.md"
+documentation = "https://docs.rs/cudakit-build"
+keywords = ["cuda", "ptx", "cuda-oxide", "gpu", "build"]
+categories = ["development-tools::build-utils", "hardware-support"]
 
 [dependencies]
 eyre = "0.6"
 sha2 = "0.10"
 tempfile = "3"
+
+[lints]
+workspace = true

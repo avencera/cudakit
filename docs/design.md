@@ -80,7 +80,7 @@ adds the module cache:
 - `runtime.load(request)` loads exactly that artifact. A cached module with another
   identity is an error, never a replacement, and a refused cubin never falls back to JIT
 - `runtime.load_embedded(area)` does both
-- `Kernels::function(name)` looks up an entry point
+- `LoadedKernels::function(name)` looks up an entry point
 
 Errors are one `cudakit::Error` enum. speakrs maps it onto its existing `CudaError`
 variants, so speakrs's public error type keeps its shape.
@@ -135,26 +135,6 @@ tracking. The driver ends an empty capture with a zero-node graph rather than no
 copies in speakrs. `Graph::as_cuda` exposes the cudarc graph for consumers that add
 conditional nodes later.
 
-## What scriptrs needs (Phase 3 in its plan)
-
-- **GEMMs.** `Sgemm` (row-major over `cublasSgemm`, TF32 mode lock) and new
-  `SgemmBatched` (`cublasSgemmStridedBatched`) for per-head attention products. Both
-  check buffer lengths against dimensions. FP16/BF16 `cublasGemmEx` is not in the first
-  API; add it when scriptrs has a measured need.
-- **Whole-encoder graph.** Allocate persistent `DeviceTensor`s per fixed chunk shape,
-  run the encoder once eagerly so cuBLAS finishes lazy setup, then
-  `unsafe { gpu.capture(|| encoder.enqueue(&gpu)) }` and `graph.launch()` per chunk
-  batch.
-  Prepare cuBLAS (`gpu.prepare(Library::Cublas)`) at model load, never inside capture.
-- **TDT decode on device.** First version: capture one decode step (predictor LSTM,
-  joint, argmax, duration advance) as a graph and replay it without host syncs, reading
-  results once per chunk. The step's control state lives in device buffers. Conditional
-  graph nodes (CUDA 12.4 floor allows them) or a persistent kernel come later and need
-  only `Graph::as_cuda` plus its own kernels.
-- **Own kernels crate.** `scriptrs-cuda-kernels` plus `scriptrs-ptx-<tier>` crates,
-  configured by a `cudakit_build::Project` in the scriptrs xtask. Its `KernelArea` enum
-  has its own `Profile` (`libraries: Allowed` while it is library-first).
-
 ## Kernel toolchain: library, not a copied script
 
 `cudakit-build` is a library that consumers' xtasks call. A standalone binary would need
@@ -182,7 +162,7 @@ cudakit/
   crates/cudakit-build/   kernel toolchain library
   docs/design.md
   scripts/setup-gpu-box.sh
-  HANDOFF.md
+  docs/guide.md
 ```
 
 `cudakit` features, mirroring speakrs's `_cuda` / `_cuda-libraries` split:
@@ -192,11 +172,12 @@ cudakit/
 | (none) | driver API only: `cudarc` with `driver`, `nvrtc` (for the `Ptx` type; NVRTC is not loaded), `dynamic-loading`, `cuda-12040` |
 | `libraries` | `cudarc/cublas`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `dnn` |
 | `serde` | serde for `DriverRelease` |
+| `test-support` | fixtures for consumers' host-only tests |
 
 Consumers make cudakit an optional dependency enabled only by their CUDA features, so CPU
 and CoreML builds stay free of cudarc.
 
-## Decisions taken without Praveen
+## Decisions
 
 - Policy (driver-only) is a runtime `Profile` value, not a cudakit Cargo feature, for the
   feature-unification reason above.
@@ -209,13 +190,13 @@ and CoreML builds stay free of cudarc.
   re-exports and stay `#[non_exhaustive]`;
   `PtxTier::{feature, compiled_in, is_compiled_in, select, native, from_env, SHIPPED}`
   move to speakrs-side helpers because they encode speakrs features and env vars. That
-  is a public API change for speakrs and needs a CHANGELOG entry before release.
+  is a public API change for speakrs.
 - The tune file stays in speakrs; only the driver release reader moves.
-- `Gpu` and `Runtime<K>` are `Send + Sync` (asked for by scriptrs, whose model moves to
-  worker threads behind a mutex). cudarc's `Cudnn` is `!Send + !Sync` and cuDNN forbids
+- `Gpu` and `Runtime<K>` are `Send + Sync`, so a model can move to a worker thread or
+  sit behind a mutex. cudarc's `Cudnn` is `!Send + !Sync` and cuDNN forbids
   one handle on two threads at once, while cudarc's descriptors each keep a clone of it.
-  Rather than one handle per planner (an extra `cudnnCreate` per speakrs conv plan,
-  unmeasured because the GPU box has no cuDNN), the shared handle is thread-affine:
+  Rather than one handle per planner (an extra `cudnnCreate` per conv plan), the
+  shared handle is thread-affine:
   `Gpu::dnn` returns it only on the thread that prepared cuDNN, so its `!Send` clones
   never leave that thread. speakrs prepares and uses cuDNN on one worker thread, so its
   behavior is unchanged. `Graph` is `Send` only, since CUDA forbids launching one
