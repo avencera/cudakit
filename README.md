@@ -49,7 +49,8 @@ CPU and CoreML builds free of cudarc.
 ```sh
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-# GPU checks fail instead of skipping when CUDAKIT_REQUIRE_GPU=1
+# GPU tests run only with CUDAKIT_REQUIRE_GPU=1 (and then fail without a GPU), so the
+# workspace tests above never take a shared GPU outside its scheduler
 CUDAKIT_REQUIRE_GPU=1 cargo test -p cudakit --features "libraries test-support" --test gpu
 ```
 

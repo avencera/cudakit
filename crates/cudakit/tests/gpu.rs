@@ -1,8 +1,9 @@
 //! GPU checks of the shared host stack: module loading, graph capture and the cuBLAS
 //! products
 //!
-//! Each test skips when no usable device is present, unless `CUDAKIT_REQUIRE_GPU=1`
-//! makes that a failure, so a GPU runner cannot silently pass
+//! The tests touch the device only with `CUDAKIT_REQUIRE_GPU=1`, which also makes a
+//! missing GPU a failure so a GPU runner cannot silently pass. Without it they skip,
+//! so a workspace `cargo test` never takes a GPU that a scheduler hands out
 
 use cudakit::cudarc::driver::{LaunchConfig, PushKernelArg};
 use cudakit::{
@@ -86,23 +87,21 @@ impl KernelArea for Area {
     }
 }
 
-/// `None` when the machine has no usable GPU and the run does not require one
-fn opened<T>(result: Result<T, Error>) -> Option<T> {
-    match result {
+/// The opened GPU, or `None` without `CUDAKIT_REQUIRE_GPU=1`
+fn opened<T>(open: impl FnOnce() -> Result<T, Error>) -> Option<T> {
+    if std::env::var_os("CUDAKIT_REQUIRE_GPU").is_none_or(|value| value != "1") {
+        eprintln!("skipping: set CUDAKIT_REQUIRE_GPU=1 to run GPU tests");
+        return None;
+    }
+
+    match open() {
         Ok(value) => Some(value),
-        Err(error)
-            if error.is_device_unavailable()
-                && std::env::var_os("CUDAKIT_REQUIRE_GPU").is_none_or(|value| value != "1") =>
-        {
-            eprintln!("skipping: {error}");
-            None
-        }
         Err(error) => panic!("opening the GPU failed: {error}"),
     }
 }
 
 fn runtime() -> Option<Runtime<Area>> {
-    opened(Runtime::open(0, Options::default()))
+    opened(|| Runtime::open(0, Options::default()))
 }
 
 /// Row-major `op(a) · op(b)` on the host
@@ -357,7 +356,7 @@ fn batched_sgemm_matches_each_product() -> Result<(), Error> {
 
 #[test]
 fn driver_only_profile_refuses_libraries_before_loading_them() -> Result<(), Error> {
-    let Some(gpu) = opened(Gpu::open(0, &DRIVER_ONLY, None)) else {
+    let Some(gpu) = opened(|| Gpu::open(0, &DRIVER_ONLY, None)) else {
         return Ok(());
     };
     for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
