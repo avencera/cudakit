@@ -16,7 +16,7 @@ const BASE: Profile = Profile {
     consumer: "cudakit-tests",
     compiled: TierSet::of(&[PtxTier::Sm75]),
     shipped: TierSet::of(&[PtxTier::Sm75]),
-    tier_features: ["test-sm75", "test-sm80", "test-sm90", "test-sm120"],
+    tier_features: &[(PtxTier::Sm75, "test-sm75")],
     libraries: LibraryPolicy::Allowed,
     extra_symbols: ExtraSymbols::NONE,
 };
@@ -202,7 +202,7 @@ fn a_missing_area_variant_names_the_area_device_and_feature() -> Result<(), Erro
     };
     let error = runtime.load_embedded(Area::Sm80Only).unwrap_err();
     assert!(matches!(error, Error::AreaTierNotCompiledIn {
-        area: "sm80-only", tier: PtxTier::Sm75, device, feature: "test-sm75"
+        area: "sm80-only", tier: PtxTier::Sm75, device, feature: Some("test-sm75")
     } if device == runtime.compute_capability()));
 
     let message = error.to_string();

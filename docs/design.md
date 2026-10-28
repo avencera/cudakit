@@ -40,7 +40,7 @@ pub struct Profile {
     pub consumer: &'static str,             // names the consumer in messages
     pub compiled: TierSet,                  // GPU target features enabled in this build
     pub shipped: TierSet,                   // tiers with shipped production kernels
-    pub tier_features: [&'static str; 4],   // Cargo feature per tier, for error messages
+    pub tier_features: &'static [(PtxTier, &'static str)], // Cargo feature per tier, for errors
     pub libraries: LibraryPolicy,           // DriverOnly or Allowed
     pub extra_symbols: ExtraSymbols,        // library entry points the consumer calls directly
 }
@@ -54,6 +54,12 @@ pub trait KernelArea: Copy + Eq + Hash + Debug + Send + Sync + 'static {
 pub struct Gpu { /* context, stream, attributes, tier limit, libraries, profile */ }
 pub struct Runtime<K: KernelArea> { /* Gpu + module cache keyed by K */ }  // Deref<Target = Gpu>
 ```
+
+Tiers are open-ended: `PtxTier` and `cudakit_build::Tier` are `#[non_exhaustive]`,
+`PtxTier::ALL` and `tier_features` are slices, and `AreaPtx` keeps its per-tier
+storage private behind const `baseline`/`with` builders. `Project::targets` limits
+the embed check to the tiers a consumer has features for. A new tier is therefore
+neither a breaking change nor a new requirement on consumers that do not target it.
 
 `Gpu` carries everything that does not depend on the consumer's areas, so `DeviceTensor`,
 `Sgemm`, conv plans and graph capture take `&Gpu` and are not generic. `Runtime<K>`

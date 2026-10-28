@@ -31,6 +31,7 @@ const PROJECT: Project = Project {
     manifest_dir: "src/cuda/ptx",
     host_kernels: "src/cuda/kernels.rs",
     host_feature: "cuda-{tier}",
+    targets: &[Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120],
     tier_crate: TierCrate {
         path: "crates/myapp-ptx-{tier}",
         description: "Prebuilt {tier} tier CUDA kernels for myapp",

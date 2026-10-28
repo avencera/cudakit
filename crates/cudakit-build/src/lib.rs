@@ -37,6 +37,7 @@ pub mod ptx_lint;
 /// Only plain `sm_XY` targets: the driver JIT-compiles their PTX for every newer GPU,
 /// while `a`-suffixed targets run on one exact architecture only
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Tier {
     /// Turing and newer; the baseline every area ships
     Sm75,
@@ -52,8 +53,8 @@ impl Tier {
     /// Every area ships this variant; it covers Turing and everything newer
     pub const BASELINE: Self = Self::Sm75;
 
-    /// Every tier, oldest first
-    pub const ALL: [Self; 4] = [Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
+    /// Every tier, oldest first; a slice so a new tier is not a breaking change
+    pub const ALL: &'static [Self] = &[Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
 
     /// The name used in file names, manifests, crate names and host features
     pub const fn name(self) -> &'static str {
@@ -106,7 +107,7 @@ impl Tier {
     }
 
     fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tier| tier.name() == name)
+        Self::ALL.iter().copied().find(|tier| tier.name() == name)
     }
 }
 
@@ -298,6 +299,12 @@ pub struct Project {
     /// The consumer feature that selects a GPU tier, with `{tier}` standing for the tier
     /// name, such as `cuda-{tier}`
     pub host_feature: &'static str,
+    /// The GPU tiers the consumer has a `host_feature` for, strictly ascending
+    ///
+    /// Embeds are checked against these rather than every tier cudakit-build knows, so a
+    /// new tier in a later release asks nothing of consumers that do not target it.
+    /// Every tier an area ships must be listed
+    pub targets: &'static [Tier],
     /// The per-tier artifact crates
     pub tier_crate: TierCrate,
     /// Kernel areas and the tiers each one ships
@@ -322,6 +329,20 @@ impl Project {
                 "cubin_arches must be strictly ascending, got {:?}",
                 self.cubin_arches
             );
+        }
+
+        if !self.targets.is_sorted_by(|a, b| a < b) {
+            bail!("targets must be strictly ascending, got {:?}", self.targets);
+        }
+
+        for area in self.areas {
+            if let Some(tier) = area.tiers.iter().find(|tier| !self.targets.contains(tier)) {
+                bail!(
+                    "area {} ships {} but targets omit it, so no feature would embed it",
+                    area.name,
+                    tier.name()
+                );
+            }
         }
 
         Ok(())
@@ -1349,6 +1370,7 @@ mod test_support {
         manifest_dir: "src/inference/cuda/ptx",
         host_kernels: "src/inference/cuda/kernels.rs",
         host_feature: "cuda-{tier}",
+        targets: &[Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120],
         tier_crate: TierCrate {
             path: "crates/speakrs-ptx-{tier}",
             description: "Prebuilt {tier} tier CUDA kernels for speakrs",
@@ -1403,6 +1425,18 @@ mod tests {
                 "{error:#}"
             );
         }
+    }
+
+    #[test]
+    fn targets_must_cover_every_shipped_tier() {
+        // wideconv ships sm120
+        let project = Project {
+            targets: &[Tier::Sm75, Tier::Sm80],
+            ..PROJECT
+        };
+        let root = std::path::Path::new("/nonexistent/cudakit-build");
+        let error = project.check(root, false).unwrap_err().to_string();
+        assert!(error.contains("ships sm120 but targets omit it"), "{error}");
     }
 
     #[test]

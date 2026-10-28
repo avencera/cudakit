@@ -16,7 +16,7 @@ static DRIVER_ONLY: Profile = Profile {
     consumer: "cudakit-tests",
     compiled: TierSet::of(&[PtxTier::Sm75]),
     shipped: TierSet::of(&[PtxTier::Sm75]),
-    tier_features: ["test-sm75", "test-sm80", "test-sm90", "test-sm120"],
+    tier_features: &[(PtxTier::Sm75, "test-sm75")],
     libraries: LibraryPolicy::DriverOnly,
     extra_symbols: ExtraSymbols::NONE,
 };

@@ -35,7 +35,12 @@ pub static PROFILE: Profile = Profile {
         .with_if(PtxTier::Sm90, cfg!(feature = "cuda-sm90"))
         .with_if(PtxTier::Sm120, cfg!(feature = "cuda-sm120")),
     shipped: TierSet::of(&[PtxTier::Sm75]),
-    tier_features: ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
+    tier_features: &[
+        (PtxTier::Sm75, "cuda-sm75"),
+        (PtxTier::Sm80, "cuda-sm80"),
+        (PtxTier::Sm90, "cuda-sm90"),
+        (PtxTier::Sm120, "cuda-sm120"),
+    ],
     libraries: LibraryPolicy::Allowed,
     extra_symbols: ExtraSymbols::NONE,
 };
@@ -74,13 +79,27 @@ impl cudakit::KernelArea for KernelModule {
                 "ptx/encoder.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
-            // ...
+            // an sm_80 variant serves Ampere and newer; the baseline keeps Turing
+            Self::Decode => cudakit::AreaPtx::baseline(cudakit::embed_tier!(
+                shipped_ptx, shipped_cubin;
+                ["cuda-sm75"],
+                "ptx/decode.sm75",
+                [75, 80, 86, 89, 90, 120]
+            ))
+            .with(cudakit::PtxTier::Sm80, cudakit::embed_tier!(
+                shipped_ptx, shipped_cubin;
+                ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                "ptx/decode.sm80",
+                [80, 86, 89, 90, 120]
+            )),
         }
     }
 }
 ```
 
-`shipped_ptx` and `shipped_cubin` are your own `const fn(&str)` lookups over your
+Each `embed_tier!` call embeds one variant under exactly the features for which it is
+the best one you ship, and is `None` in builds without them. `shipped_ptx` and
+`shipped_cubin` are your own `const fn(&str)` lookups over your
 `<app>-ptx-<tier>` crates, which `cudakit-build` generates. Keep the lookups in const
 context: a run-time call links every shipped file into the binary. `#[inline(never)]`
 stops each codegen unit from copying the embedded bytes.
@@ -194,12 +213,17 @@ const PROJECT: Project = Project {
     manifest_dir: "src/cuda/ptx",
     host_kernels: "src/cuda/kernels.rs",
     host_feature: "cuda-{tier}",
+    // the tiers you have features for; a later cudakit-build tier is ignored until listed
+    targets: &[Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120],
     tier_crate: TierCrate {
         path: "crates/myapp-ptx-{tier}",
         description: "Prebuilt {tier} tier CUDA kernels for myapp",
         example_area: "encoder",
     },
-    areas: &[Area::new("encoder", &[Tier::Sm75]), Area::new("decode", &[Tier::Sm75])],
+    areas: &[
+        Area::new("encoder", &[Tier::Sm75]),
+        Area::new("decode", &[Tier::Sm75, Tier::Sm80]),
+    ],
     // write the pins out in full, not `Pins::CURRENT`: a cudakit-build default bump would
     // otherwise make every committed artifact stale
     pins: Pins {

@@ -52,8 +52,11 @@ impl PtxTier {
     /// The tier every area ships and every supported GPU runs
     pub const BASELINE: Self = Self::Sm75;
 
-    /// Every tier, lowest first
-    pub const ALL: [Self; 4] = [Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
+    /// Every tier, lowest first; a slice so a new tier is not a breaking change
+    pub const ALL: &'static [Self] = &[Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
+
+    /// Number of tiers, for per-tier storage
+    pub(crate) const COUNT: usize = Self::ALL.len();
 
     /// The name used in PTX file names, such as `sm75`
     pub const fn name(self) -> &'static str {
@@ -76,7 +79,7 @@ impl PtxTier {
     }
 
     /// Position in [`Self::ALL`]
-    pub const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         match self {
             Self::Sm75 => 0,
             Self::Sm80 => 1,
@@ -98,7 +101,8 @@ impl FromStr for PtxTier {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let value = value.trim();
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|tier| tier.name() == value)
             .ok_or_else(|| Error::InvalidPtxTier {
                 value: value.to_string(),
@@ -108,7 +112,7 @@ impl FromStr for PtxTier {
 
 /// A set of PTX tiers, usable in const context
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct TierSet(u8);
+pub struct TierSet(u32);
 
 impl TierSet {
     /// No tiers
@@ -143,7 +147,8 @@ impl TierSet {
     /// The tiers in the set, lowest first
     pub fn iter(self) -> impl Iterator<Item = PtxTier> {
         PtxTier::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(move |tier| self.contains(*tier))
     }
 }

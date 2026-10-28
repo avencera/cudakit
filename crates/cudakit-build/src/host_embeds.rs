@@ -7,7 +7,7 @@ use std::path::Path;
 
 use eyre::{Context, Result};
 
-use crate::{Project, Tier};
+use crate::Project;
 
 impl Project {
     /// The host must embed each declared variant only for tiers that select it
@@ -27,8 +27,10 @@ impl Project {
             .flat_map(|area| {
                 area.variants().map(|variant| {
                     // each GPU tier uses the newest variant that this area ships
-                    let features = Tier::ALL
-                        .into_iter()
+                    let features = self
+                        .targets
+                        .iter()
+                        .copied()
                         .filter(|tier| area.embeds(variant.tier, *tier))
                         .map(|tier| self.host_feature(tier))
                         .collect();
@@ -199,7 +201,6 @@ fn embedded_ptx_files(source: &str) -> BTreeMap<String, Vec<Option<Vec<String>>>
 
 #[cfg(test)]
 mod tests {
-    use crate::Tier;
     use crate::test_support::PROJECT;
 
     fn host_source() -> String {
@@ -208,8 +209,10 @@ mod tests {
             .iter()
             .flat_map(|area| area.variants())
             .map(|variant| {
-                let mask = Tier::ALL
-                    .into_iter()
+                let mask = PROJECT
+                    .targets
+                    .iter()
+                    .copied()
                     .filter(|tier| variant.area.embeds(variant.tier, *tier))
                     .map(|tier| format!("{:?}", PROJECT.host_feature(tier)))
                     .collect::<Vec<_>>()

@@ -67,18 +67,19 @@ pub enum Error {
         library: Library,
     },
     /// A required PTX tier is absent from this build
-    #[error("PTX tier {tier} for device {device} is not compiled in; enable `{feature}`")]
+    #[error("PTX tier {tier} for device {device} is not compiled in; {}", enable(*.feature, *.tier))]
     TierNotCompiledIn {
         /// Required PTX tier
         tier: PtxTier,
         /// Exact device capability
         device: ComputeCapability,
-        /// Consumer Cargo feature that embeds the tier
-        feature: &'static str,
+        /// Consumer Cargo feature that embeds the tier, when the profile names one
+        feature: Option<&'static str>,
     },
     /// An area has no embedded variant that the device can run within the tier limit
     #[error(
-        "CUDA area {area} has no runnable PTX at tier {tier} for device {device}; enable `{feature}`"
+        "CUDA area {area} has no runnable PTX at tier {tier} for device {device}; {}",
+        enable(*.feature, *.tier)
     )]
     AreaTierNotCompiledIn {
         /// Kernel area without a runnable variant
@@ -87,8 +88,9 @@ pub enum Error {
         tier: PtxTier,
         /// Exact device capability
         device: ComputeCapability,
-        /// Consumer Cargo feature that embeds a runnable variant
-        feature: &'static str,
+        /// Consumer Cargo feature that embeds a runnable variant, when the profile names
+        /// one
+        feature: Option<&'static str>,
     },
     /// A module request names a tier above the runtime's PTX tier limit
     #[error("CUDA area {area} requested tier {tier}, above this runtime's {limit} limit")]
@@ -248,4 +250,12 @@ pub fn element_count(context: &'static str, shape: &[usize]) -> Result<usize, Er
             value: dim,
         })
     })
+}
+
+/// The hint that ends a missing-tier message
+fn enable(feature: Option<&'static str>, tier: PtxTier) -> String {
+    match feature {
+        Some(feature) => format!("enable `{feature}`"),
+        None => format!("enable a feature that embeds {tier}"),
+    }
 }

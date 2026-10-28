@@ -49,9 +49,9 @@ pub struct Profile {
     pub compiled: TierSet,
     /// Tiers with shipped production kernels, independent of Cargo features
     pub shipped: TierSet,
-    /// The consumer's Cargo feature for each tier in [`PtxTier::ALL`] order, named in
-    /// errors that ask the user to enable a tier
-    pub tier_features: [&'static str; 4],
+    /// The consumer's Cargo feature for each tier it can embed, named in errors that
+    /// ask the user to enable a tier. Tiers without an entry get a generic hint
+    pub tier_features: &'static [(PtxTier, &'static str)],
     /// Whether optional libraries may be loaded
     pub libraries: LibraryPolicy,
     /// Library symbols the consumer calls directly
@@ -64,9 +64,17 @@ impl Profile {
         matches!(self.libraries, LibraryPolicy::DriverOnly)
     }
 
-    /// The consumer's Cargo feature for `tier`
-    pub const fn feature(&self, tier: PtxTier) -> &'static str {
-        self.tier_features[tier.index()]
+    /// The consumer's Cargo feature for `tier`, if [`Self::tier_features`] names one
+    pub const fn feature(&self, tier: PtxTier) -> Option<&'static str> {
+        let mut index = 0;
+        while index < self.tier_features.len() {
+            let (candidate, feature) = self.tier_features[index];
+            if candidate.index() == tier.index() {
+                return Some(feature);
+            }
+            index += 1;
+        }
+        None
     }
 
     /// Whether this build embeds `tier`
@@ -150,7 +158,11 @@ mod tests {
             consumer: "test",
             compiled: TierSet::of(compiled),
             shipped: TierSet::of(&[PtxTier::Sm75]),
-            tier_features: ["t-sm75", "t-sm80", "t-sm90", "t-sm120"],
+            tier_features: &[
+                (PtxTier::Sm75, "t-sm75"),
+                (PtxTier::Sm80, "t-sm80"),
+                (PtxTier::Sm120, "t-sm120"),
+            ],
             libraries: LibraryPolicy::DriverOnly,
             extra_symbols: ExtraSymbols::NONE,
         }
@@ -178,7 +190,7 @@ mod tests {
                             feature, device: d, ..
                         }),
                     ) => {
-                        assert_eq!(feature, "t-sm75");
+                        assert_eq!(feature, Some("t-sm75"));
                         assert_eq!(d, device);
                     }
                     (expected, actual) => panic!("{expected:?} vs {actual:?}"),
@@ -207,10 +219,21 @@ mod tests {
             profile.select(device, Some(PtxTier::Sm120)),
             Err(Error::TierNotCompiledIn {
                 tier: PtxTier::Sm120,
-                feature: "t-sm120",
+                feature: Some("t-sm120"),
                 ..
             })
         ));
+        // a tier the profile names no feature for still gets a usable message
+        let error = profile.select(device, Some(PtxTier::Sm90)).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::TierNotCompiledIn { feature: None, .. }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("enable a feature that embeds sm90")
+        );
     }
 
     #[test]

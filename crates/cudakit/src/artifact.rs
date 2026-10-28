@@ -192,72 +192,53 @@ impl EmbeddedPtx {
 /// `cudakit-build` checks, so the host can load any of them
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AreaPtx {
-    /// The `sm_75` variant
-    pub sm75: Option<EmbeddedPtx>,
-    /// The `sm_80` variant
-    pub sm80: Option<EmbeddedPtx>,
-    /// The `sm_90` variant
-    pub sm90: Option<EmbeddedPtx>,
-    /// The `sm_120` variant
-    pub sm120: Option<EmbeddedPtx>,
+    // indexed by tier; private so a new tier is not a breaking change
+    variants: [Option<EmbeddedPtx>; PtxTier::COUNT],
 }
 
 impl AreaPtx {
+    /// An area with no embedded variant yet; add them with [`Self::with`]
+    pub const EMPTY: Self = Self {
+        variants: [None; PtxTier::COUNT],
+    };
+
     /// An area that ships only the baseline variant
     pub const fn baseline(sm75: Option<EmbeddedPtx>) -> Self {
-        Self {
-            sm75,
-            sm80: None,
-            sm90: None,
-            sm120: None,
-        }
+        Self::EMPTY.with(PtxTier::BASELINE, sm75)
+    }
+
+    /// This area with `ptx` as its `tier` variant, usually from [`embed_tier!`], which
+    /// is `None` when the build does not embed it
+    pub const fn with(mut self, tier: PtxTier, ptx: Option<EmbeddedPtx>) -> Self {
+        self.variants[tier.index()] = ptx;
+        self
     }
 
     /// Embedded variants without cubins, for host-only tests such as a fake higher tier
     #[cfg(feature = "test-support")]
     pub fn fixture(variants: &[(PtxTier, &'static str)]) -> Self {
-        let mut area = Self::baseline(None);
-        for (tier, text) in variants {
-            let ptx = Some(EmbeddedPtx { text, cubins: &[] });
-            match tier {
-                PtxTier::Sm75 => area.sm75 = ptx,
-                PtxTier::Sm80 => area.sm80 = ptx,
-                PtxTier::Sm90 => area.sm90 = ptx,
-                PtxTier::Sm120 => area.sm120 = ptx,
-            }
-        }
-        area
+        variants.iter().fold(Self::EMPTY, |area, (tier, text)| {
+            area.with(*tier, Some(EmbeddedPtx { text, cubins: &[] }))
+        })
     }
 
     /// The embedded variants, lowest tier first
     pub fn iter(&self) -> impl Iterator<Item = (PtxTier, &'static str)> {
-        [
-            (PtxTier::Sm75, self.sm75),
-            (PtxTier::Sm80, self.sm80),
-            (PtxTier::Sm90, self.sm90),
-            (PtxTier::Sm120, self.sm120),
-        ]
-        .into_iter()
-        .filter_map(|(tier, ptx)| Some((tier, ptx?.text)))
+        PtxTier::ALL
+            .iter()
+            .filter_map(|tier| Some((*tier, self.embedded(*tier)?.text)))
     }
 
     /// The embedded bytes for one specific tier
     pub fn embedded(&self, tier: PtxTier) -> Option<EmbeddedPtx> {
-        match tier {
-            PtxTier::Sm75 => self.sm75,
-            PtxTier::Sm80 => self.sm80,
-            PtxTier::Sm90 => self.sm90,
-            PtxTier::Sm120 => self.sm120,
-        }
+        self.variants[tier.index()]
     }
 
     /// The highest runnable embedded tier, without hashing its artifact
     pub fn runnable_tier(self, limit: PtxTier, device: ComputeCapability) -> Option<PtxTier> {
-        [PtxTier::Sm120, PtxTier::Sm90, PtxTier::Sm80, PtxTier::Sm75]
-            .into_iter()
-            .find(|tier| {
-                *tier <= limit && tier.min_capability() <= device && self.embedded(*tier).is_some()
-            })
+        PtxTier::ALL.iter().copied().rev().find(|tier| {
+            *tier <= limit && tier.min_capability() <= device && self.embedded(*tier).is_some()
+        })
     }
 
     /// The best runnable tier and this device's exact cubin, or its PTX when the area
