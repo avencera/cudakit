@@ -281,6 +281,11 @@ pub struct Project {
     /// named in generated files and in hints
     pub command: &'static str,
     /// The cuda-oxide kernel crate directory
+    ///
+    /// The crate must be its own workspace (an empty `[workspace]` table) with its own
+    /// `Cargo.lock` and no path dependencies, since source hashes cover only this
+    /// directory: a shared lockfile or a sibling crate could change the PTX without
+    /// changing the hash. `build` and `check` reject any other layout
     pub kernel_crate: &'static str,
     /// The kernel crate's package name; cuda-oxide names its PTX after it
     pub kernel_package: &'static str,
@@ -322,12 +327,53 @@ impl Project {
         Ok(())
     }
 
+    /// Rejects a kernel crate whose PTX could depend on files outside its directory
+    fn check_kernel_crate(&self, root: &Path) -> Result<()> {
+        let dir = root.join(self.kernel_crate);
+        let manifest = fs::read_to_string(dir.join("Cargo.toml"))
+            .wrap_err_with(|| format!("reading {}/Cargo.toml", self.kernel_crate))?;
+        let mut section = "";
+        let mut standalone = false;
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line;
+                standalone |= line == "[workspace]";
+                continue;
+            }
+
+            let dependency = section.contains("dependencies") || section.contains("patch");
+            let key = line.split('=').next().unwrap_or_default().trim();
+            if dependency && (key == "path" || line.contains("path =") || line.contains("path=")) {
+                bail!(
+                    "{}/Cargo.toml has a path dependency (`{line}`); source hashes cover only the kernel crate, so it cannot depend on other local crates",
+                    self.kernel_crate
+                );
+            }
+        }
+
+        if !standalone {
+            bail!(
+                "{}/Cargo.toml needs its own `[workspace]` table, so its `Cargo.lock` is the one that resolves its dependencies",
+                self.kernel_crate
+            );
+        }
+        if !dir.join("Cargo.lock").is_file() {
+            bail!(
+                "{} has no Cargo.lock; commit one so dependency versions are part of the source hash",
+                self.kernel_crate
+            );
+        }
+
+        Ok(())
+    }
+
     /// Regenerate PTX for every variant of the given areas, or of every area when none
     /// are given, then build their cubins with the pinned ptxas
     ///
     /// Needs cargo-oxide, the pinned nightly and CUDA 13, so it runs on the GPU box
     pub fn build(&self, root: &Path, areas: &[String]) -> Result<()> {
         self.validate()?;
+        self.check_kernel_crate(root)?;
         let areas = self.selected_areas(areas)?;
         let ptxas = Ptxas::pinned(self.pins.ptxas)?;
         let dirs = ArtifactDirs::new(self, root);
@@ -366,6 +412,7 @@ impl Project {
     /// With `rebuild`, requires pinned ptxas and byte-identical rebuilt cubins
     pub fn check(&self, root: &Path, rebuild: bool) -> Result<()> {
         self.validate()?;
+        self.check_kernel_crate(root)?;
         let dirs = ArtifactDirs::new(self, root);
         let mut problems = Vec::new();
 
@@ -1354,6 +1401,40 @@ mod tests {
             assert!(
                 error.to_string().contains("strictly ascending"),
                 "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_crates_must_be_self_contained() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let dir = root.path().join(PROJECT.kernel_crate);
+        std::fs::create_dir_all(&dir).expect("kernel crate");
+        let standalone = "[package]\nname = \"k\"\n[lib]\npath = \"src/lib.rs\"\n[workspace]\n";
+        let error = |manifest: &str| {
+            std::fs::write(dir.join("Cargo.toml"), manifest).expect("manifest");
+            PROJECT
+                .check_kernel_crate(root.path())
+                .map_err(|error| error.to_string())
+        };
+
+        assert!(error(standalone).unwrap_err().contains("no Cargo.lock"));
+        std::fs::write(dir.join("Cargo.lock"), "").expect("lockfile");
+        error(standalone).expect("a standalone crate with its own lockfile passes");
+        assert!(
+            error("[package]\nname = \"k\"\n")
+                .unwrap_err()
+                .contains("[workspace]")
+        );
+        for dependency in [
+            "[dependencies]\nshared = { path = \"../shared\" }\n",
+            "[dependencies.shared]\npath = \"../shared\"\n",
+            "[patch.crates-io]\ncuda-std = { path = \"../cuda-std\" }\n",
+        ] {
+            let manifest = format!("{standalone}{dependency}");
+            assert!(
+                error(&manifest).unwrap_err().contains("path dependency"),
+                "{dependency}"
             );
         }
     }
