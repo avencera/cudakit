@@ -115,7 +115,8 @@ A consumer:
    every file of every enabled tier crate into the binary (fixed in speakrs 0.7.0).
 3. Implements `KernelArea` for its area enum with `variants()` built from `tier_ptx!`
    calls and marked `#[inline(never)]` so codegen units do not each copy the bytes.
-4. Declares a `cudakit_build::Project` in its xtask and calls `cudakit_build::cli`.
+4. Declares a const `cudakit_build::Project` in its xtask and forwards its subcommands to
+   `Project::{build, build_cubins, check}`.
 
 ### Graph capture
 

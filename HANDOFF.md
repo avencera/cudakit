@@ -16,7 +16,7 @@ why things are shaped this way.
 | `dnn::{ConvPlanner, ConvPlan, Residual}`, `Conv2d` | Stable. speakrs's convolution fallback |
 | `identity::{DriverIdentity, DriverRelease}` | Stable |
 | `Error` | `#[non_exhaustive]`. New variants may appear |
-| `cudakit-build` (kernel toolchain library) | **Not ready yet.** Being ported from speakrs's xtask |
+| `cudakit-build` (`Project`, `Area`, `Tier`, `Pins`, `TierCrate`, `CubinArch`) | Usable. speakrs's `cargo xtask cuda-kernels` runs on it and its committed artifacts check unchanged. Not published |
 
 `Math` is exhaustive on purpose. Consumers persist it, so adding a variant is a
 breaking change.
@@ -90,7 +90,7 @@ impl cudakit::KernelArea for KernelModule {
 `shipped_ptx` and `shipped_cubin` are your own `const fn(&str)` lookups over your
 `<app>-ptx-<tier>` crates. speakrs's `src/inference/cuda/kernels.rs` is the model to
 copy. Keep the lookups in const context: a run-time call links every shipped file into
-the binary. Until `cudakit-build` lands, `embed_tier!` is usable with hand-built PTX.
+the binary.
 
 ### 4. Open, prepare, load
 
@@ -155,14 +155,56 @@ queued nothing.
 - Errors: `impl From<cudakit::Error> for YourError`. `Error::is_device_unavailable`
   separates a missing GPU or driver from a broken install
 
-## Kernel toolchain (pending)
+## Kernel toolchain
 
-`cudakit-build` will give your xtask the speakrs toolchain as a library:
+`cudakit-build` is the speakrs toolchain as a library. Your xtask declares one const
+`Project` and forwards its subcommands:
 
-- variant builds with the pinned cuda-oxide rev and nightly
-- ptxas pinning and cubin manifests
-- entry-point and header checks, and PTX lint
-- tier-crate rendering and the host embed-mask check
+```rust
+use cudakit_build::{Area, CubinArch, Pins, Project, Tier, TierCrate};
 
-You configure it with a `Project` that names your kernels crate, areas and pins. This
-section will be filled in when it lands.
+const PROJECT: Project = Project {
+    name: "scriptrs",
+    command: "cargo xtask cuda-kernels",
+    kernel_crate: "crates/scriptrs-cuda-kernels",
+    kernel_package: "scriptrs-cuda-kernels",
+    manifest_dir: "src/cuda/ptx",
+    host_kernels: "src/cuda/kernels.rs",
+    host_feature: "cuda-{tier}",
+    tier_crate: TierCrate {
+        path: "crates/scriptrs-ptx-{tier}",
+        description: "Prebuilt {tier} tier CUDA kernels for scriptrs",
+        example_area: "encoder",
+    },
+    areas: &[Area::new("encoder", &[Tier::Sm75]), Area::new("decode", &[Tier::Sm75])],
+    // write the pins out in full, not `Pins::CURRENT`: a cudakit-build default bump would
+    // otherwise make every committed artifact stale
+    pins: Pins {
+        cuda_oxide_rev: "918bbde123671153b29a89542f1781f1c7494c14",
+        cuda_oxide_nightly: "nightly-2026-08-28",
+        max_ptx_isa: (9, 0),
+        ptxas: "Cuda compilation tools, release 13.0, V13.0.88",
+    },
+    cubin_arches: &[
+        CubinArch(75), CubinArch(80), CubinArch(86), CubinArch(89), CubinArch(90), CubinArch(120),
+    ],
+};
+
+// `build` (PTX + cubins) and `build-cubins` need the GPU box; `check` runs anywhere
+PROJECT.check(&workspace_root, false)?;
+```
+
+- `build` regenerates PTX with the pinned cuda-oxide rev and nightly, then cubins with
+  the pinned ptxas, and rewrites the tier crates' `lib.rs`
+- `build_cubins` rebuilds cubins from the committed PTX bytes only
+- `check` verifies source and PTX hashes, PTX headers and `MAX_PTX_ISA`, entry points
+  across an area's variants, the cubin matrix and hashes, the generated tier crates, and
+  the feature and architecture masks of every `tier_ptx!` call in `host_kernels`.
+  `check(root, true)` also rebuilds cubins and requires identical bytes
+- `cubin_arches` must be strictly ascending; every entry point rejects any other order
+- the host check scans every `tier_ptx!(` call outside `//` comments, macro bodies
+  included, so write your wrapper as a pass-through
+  (`($($variant:tt)*) => { cudakit::embed_tier!(..; $($variant)*) }`)
+- `ptx_lint` is public for consumers that lint PTX outside `check`
+
+`scripts/setup-gpu-box.sh --probe <kernel-crate>` prepares the box with the same pins.

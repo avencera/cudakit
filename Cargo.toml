@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cudakit"]
+members = ["crates/cudakit", "crates/cudakit-build"]
 resolver = "3"
 
 [workspace.package]

@@ -1,0 +1,14 @@
+[package]
+name = "cudakit-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Kernel toolchain for cudakit consumers: builds cuda-oxide kernels to PTX, pins cubins and checks committed artifacts"
+publish = false
+
+[dependencies]
+color-eyre = "0.6"
+sha2 = "0.10"
+tempfile = "3"

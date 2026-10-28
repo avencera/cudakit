@@ -26,7 +26,7 @@ with cuda-oxide and embedded as PTX plus exact-architecture cubins.
   the capture
 - `dnn`: a cuDNN convolution planner
 - `identity`: the driver release, for persisted tuning keys
-- `cudakit-build`: the offline kernel toolchain library that consumers' xtasks call (in progress)
+- `cudakit-build`: the offline kernel toolchain library that consumers' xtasks call
 
 ## Features
 
