@@ -59,6 +59,13 @@ pub enum Error {
         /// The library that was not prepared
         library: Library,
     },
+    /// A thread-affine library handle was requested on a thread other than the one
+    /// that prepared it
+    #[error("{library} was prepared on another thread and may be used only there")]
+    LibraryOnAnotherThread {
+        /// The library whose handle is bound to another thread
+        library: Library,
+    },
     /// A required PTX tier is absent from this build
     #[error("PTX tier {tier} for device {device} is not compiled in; enable `{feature}`")]
     TierNotCompiledIn {

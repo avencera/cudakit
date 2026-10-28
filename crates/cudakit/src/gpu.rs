@@ -169,6 +169,11 @@ impl Gpu {
     }
 
     /// The already prepared cuDNN handle
+    ///
+    /// The handle is bound to the thread that prepared cuDNN, and any other thread gets
+    /// [`Error::LibraryOnAnotherThread`]: cuDNN forbids using one handle on two threads
+    /// at once, and the descriptors and plans made from it keep `!Send` clones, so they
+    /// stay on that thread as well
     #[cfg(feature = "libraries")]
     pub fn dnn(&self) -> Result<&Arc<Cudnn>, Error> {
         self.profile.allow(Library::Cudnn)?;

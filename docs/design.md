@@ -211,3 +211,12 @@ and CoreML builds stay free of cudarc.
   move to speakrs-side helpers because they encode speakrs features and env vars. That
   is a public API change for speakrs and needs a CHANGELOG entry before release.
 - The tune file stays in speakrs; only the driver release reader moves.
+- `Gpu` and `Runtime<K>` are `Send + Sync` (asked for by scriptrs, whose model moves to
+  worker threads behind a mutex). cudarc's `Cudnn` is `!Send + !Sync` and cuDNN forbids
+  one handle on two threads at once, while cudarc's descriptors each keep a clone of it.
+  Rather than one handle per planner (an extra `cudnnCreate` per speakrs conv plan,
+  unmeasured because the GPU box has no cuDNN), the shared handle is thread-affine:
+  `Gpu::dnn` returns it only on the thread that prepared cuDNN, so its `!Send` clones
+  never leave that thread. speakrs prepares and uses cuDNN on one worker thread, so its
+  behavior is unchanged. `Graph` is `Send` only, since CUDA forbids launching one
+  executable graph from two threads at once.

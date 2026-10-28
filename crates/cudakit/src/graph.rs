@@ -12,7 +12,15 @@ use crate::{Error, Gpu};
 /// only destroys its driver handles, so a graph that is never launched again may
 /// outlive its buffers. Replays record no cudarc events, which is safe as long as the
 /// buffers are used only on this GPU's stream
+///
+/// `Send` but not `Sync`: driver graph handles work from any thread, but CUDA forbids
+/// using one executable graph from two threads at once
 pub struct Graph(CudaGraph);
+
+// SAFETY: the raw graph and executable handles are driver objects usable from any
+// thread, and cudarc's launch binds the graph's context first. Without `Sync`, only
+// one thread can reach a graph at a time
+unsafe impl Send for Graph {}
 
 impl std::fmt::Debug for Graph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -53,6 +61,10 @@ impl Gpu {
     /// a replay reads or writes freed device memory. Either keep the buffers alive and
     /// in place for as long as the graph exists, or make it impossible to launch the
     /// graph once any of them is freed or replaced
+    ///
+    /// No other thread may use this GPU until the capture returns: the stream records
+    /// whatever any thread queues on it, so another thread's work would land in this
+    /// graph with buffers the caller does not control
     pub unsafe fn capture<E: From<Error>>(
         &self,
         enqueue: impl FnOnce() -> Result<(), E>,

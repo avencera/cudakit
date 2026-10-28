@@ -2,6 +2,7 @@
 
 use std::ffi::{CStr, OsStr};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::thread::{self, ThreadId};
 
 use libloading::Library as SharedObject;
 
@@ -39,11 +40,25 @@ struct Blas {
     _library: SharedObject,
 }
 
+/// The shared cuDNN handle, bound to the thread that created it
+///
+/// cuDNN allows a handle on any thread but never on two at once, and cudarc's
+/// descriptors and plans each keep a clone of it. Handing it out only on `owner`
+/// keeps every use on one thread, since the clones are `!Send` and stay there too
 #[derive(Debug)]
 struct Dnn {
+    owner: ThreadId,
     handle: Arc<Cudnn>,
     _library: SharedObject,
 }
+
+// SAFETY: other threads never reach `handle` except to drop it: `Libraries::dnn`
+// returns it only on `owner`. Dropping on another thread only decrements the atomic
+// count, and a final drop there destroys the handle when no clone, and so no use on
+// `owner`, remains; cuDNN allows that from any thread
+unsafe impl Send for Dnn {}
+// SAFETY: see `Send`; a shared reference gives other threads nothing but `owner`
+unsafe impl Sync for Dnn {}
 
 /// Versions of the loaded numerical libraries, for tune-file identities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +102,7 @@ impl Libraries {
                 let checked = present(profile, library)?;
                 let handle = Cudnn::new(stream.clone()).map_err(Failure::Dnn)?;
                 Ok(Dnn {
+                    owner: thread::current().id(),
                     handle,
                     _library: checked,
                 })
@@ -127,8 +143,16 @@ impl Libraries {
         cached(value).map(|blas| &blas.handle)
     }
 
+    /// The shared cuDNN handle, only on the thread that prepared it
     pub(crate) fn dnn(&self) -> Result<&Arc<Cudnn>, Error> {
-        cached(self.dnn.get().ok_or(unprepared(Library::Cudnn))?).map(|dnn| &dnn.handle)
+        let dnn = cached(self.dnn.get().ok_or(unprepared(Library::Cudnn))?)?;
+        if dnn.owner != thread::current().id() {
+            return Err(Error::LibraryOnAnotherThread {
+                library: Library::Cudnn,
+            });
+        }
+
+        Ok(&dnn.handle)
     }
 
     pub(crate) fn lock_blas(&self, math: Math) -> Result<MutexGuard<'_, Math>, Error> {

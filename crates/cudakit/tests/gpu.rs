@@ -236,6 +236,75 @@ fn capture_reports_empty_work_and_survives_a_failed_enqueue() -> Result<(), Erro
 }
 
 #[test]
+fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Result<(), Error> {
+    fn send_sync<T: Send + Sync>() {}
+    fn send<T: Send>() {}
+    send_sync::<Runtime<Area>>();
+    send::<cudakit::Graph>();
+
+    let Some(runtime) = runtime() else {
+        return Ok(());
+    };
+    runtime.prepare(Library::Cublas)?;
+    let cudnn = match runtime.prepare(Library::Cudnn) {
+        Ok(()) => true,
+        Err(Error::LibraryUnavailable { .. }) => {
+            eprintln!("cuDNN is not installed: skipping its thread check");
+            false
+        }
+        Err(error) => return Err(error),
+    };
+    let function = runtime.load_embedded(Area::AddOne)?.function("add_one")?;
+    let stream = runtime.stream();
+    let len = 256_u32;
+    let mut data = stream.clone_htod(&vec![0.0_f32; len as usize])?;
+    let enqueue = || {
+        let mut launch = stream.launch_builder(&function);
+        launch.arg(&mut data).arg(&len);
+        // SAFETY: the kernel reads and writes `len` floats of `data`, which holds that many
+        unsafe { launch.launch(LaunchConfig::for_num_elems(len)) }?;
+        Ok::<(), Error>(())
+    };
+    // SAFETY: `data` is declared before `graph` and outlives it, and only the scoped
+    // thread below launches it, after the capture returned
+    let graph = unsafe { runtime.capture_nonempty(enqueue) }?;
+
+    let spec = Sgemm::new(3, 3, 3);
+    let (a, b) = (values(9, 5), values(9, 6));
+    // the graph moves to the worker, since it is `Send` but not `Sync`
+    let (shared, a_host, b_host) = (&runtime, &a, &b);
+    let product = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let (runtime, stream) = (shared, shared.stream());
+                if cudnn {
+                    assert!(matches!(
+                        runtime.dnn(),
+                        Err(Error::LibraryOnAnotherThread {
+                            library: Library::Cudnn
+                        })
+                    ));
+                }
+
+                graph.launch()?;
+                let mut c = stream.alloc_zeros::<f32>(9)?;
+                let (a, b) = (stream.clone_htod(a_host)?, stream.clone_htod(b_host)?);
+                runtime.sgemm(spec, &a, &b, &mut c)?;
+                Ok::<_, Error>(stream.clone_dtoh(&c)?)
+            })
+            .join()
+            .expect("worker thread panicked")
+    })?;
+
+    assert_close(&product, &reference(spec, &a, &b));
+    assert!(stream.clone_dtoh(&data)?.iter().all(|value| *value == 1.0));
+    if cudnn {
+        runtime.dnn()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn sgemm_matches_the_row_major_reference() -> Result<(), Error> {
     let Some(runtime) = runtime() else {
         return Ok(());

@@ -15,7 +15,7 @@ why things are shaped this way.
 | `Gpu::capture`, `capture_nonempty`, `Graph` | Stable. All three speakrs capture sites use them. Capture became `unsafe` after `0a36e85` |
 | `dnn::{ConvPlanner, ConvPlan, Residual}`, `Conv2d` | Stable. speakrs's convolution fallback |
 | `identity::{DriverIdentity, DriverRelease}` | Stable |
-| `Error` | `#[non_exhaustive]`. New variants may appear |
+| `Error` | `#[non_exhaustive]`. New variants may appear (`LibraryOnAnotherThread` was added after `a2b1ddd`) |
 | `cudakit-build` (`Project`, `Area`, `Tier`, `Pins`, `TierCrate`, `CubinArch`) | Usable. speakrs's `cargo xtask cuda-kernels` runs on it and its committed artifacts check unchanged. Not published |
 
 `Math` is exhaustive on purpose. Consumers persist it, so adding a variant is a
@@ -102,8 +102,17 @@ let softmax = kernels.function("softmax_rows")?;      // PTX entry name = Rust f
 ```
 
 `Runtime` dereferences to `Gpu`, so `runtime.stream()`, `runtime.sgemm(..)` and
-`runtime.capture(..)` all work directly on it. Use one `Runtime` per worker thread.
-Everything it issues runs in order on its one stream.
+`runtime.capture(..)` all work directly on it. Everything it issues runs in order on
+its one stream.
+
+`Runtime` and `Gpu` are `Send + Sync`, so a loaded model can move to a worker thread or
+sit behind an `Arc<Mutex<..>>`. `Graph` is `Send` but not `Sync`. Two limits:
+
+- Capture needs the GPU to itself: the stream records whatever any thread queues
+  during the capture, so serialize capture against other work on the same `Runtime`
+- The cuDNN handle is bound to the thread that prepared cuDNN. `Gpu::dnn` returns
+  `Error::LibraryOnAnotherThread` elsewhere, and `dnn::ConvPlan`s stay on that thread
+  (they are `!Send`). cuBLAS has no such limit
 
 ### 5. GEMMs
 
