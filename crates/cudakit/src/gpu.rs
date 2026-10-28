@@ -1,20 +1,15 @@
-use std::sync::Arc;
-#[cfg(feature = "libraries")]
-use std::sync::MutexGuard;
-
-#[cfg(feature = "libraries")]
-use cudarc::cublas::CudaBlas;
 #[cfg(feature = "libraries")]
 use cudarc::cudnn::Cudnn;
 use cudarc::driver::sys::CUresult;
 use cudarc::driver::{CudaContext, CudaFunction, CudaStream, DriverError};
+use std::sync::Arc;
 use tracing::debug;
 
 #[cfg(feature = "libraries")]
 use crate::Math;
 use crate::device::DeviceAttributes;
 #[cfg(feature = "libraries")]
-use crate::libraries::{Libraries, LibraryVersions};
+use crate::libraries::{BlasGuard, Libraries, LibraryVersions};
 use crate::profile::Profile;
 use crate::{ComputeCapability, Error, Library, PtxTier};
 
@@ -153,23 +148,29 @@ impl Gpu {
         }
     }
 
-    /// The already prepared cuBLAS handle, with this GPU's context bound to the
-    /// calling thread
+    /// The prepared cuBLAS handle in `math` precision, for cuBLAS calls beyond
+    /// [`Gpu::sgemm`] and [`Gpu::sgemm_batched`]
     ///
-    /// cudarc's cuBLAS calls do not bind the context themselves, so a thread that
-    /// makes another context current before calling the handle must bind this one again
+    /// The guard holds the handle's mode lock, so no other thread's GEMM can change the
+    /// math mode until it drops, and this GPU's context is bound to the calling thread.
+    /// cudarc's cuBLAS calls do not bind the context themselves, so a thread that makes
+    /// another context current while holding the guard must bind this one again. List
+    /// any entry point you call in [`Profile::extra_symbols`]
+    ///
+    /// # Safety
+    ///
+    /// The handle is shared with cudakit's own GEMMs, which pass host scalars on this
+    /// GPU's stream in the math mode they select. The caller must leave the handle's
+    /// pointer mode, math mode, stream and workspace as they are, both while the guard
+    /// lives and after it drops
     #[cfg(feature = "libraries")]
-    pub fn blas(&self) -> Result<&CudaBlas, Error> {
-        self.profile.allow(Library::Cublas)?;
-        let blas = self.libraries.blas()?;
-        self.context.bind_to_thread()?;
-        Ok(blas)
+    pub unsafe fn blas(&self, math: Math) -> Result<BlasGuard<'_>, Error> {
+        self.blas_in(math)
     }
 
-    /// Selects `math` on the prepared cuBLAS handle and holds the mode lock, so mode
-    /// selection and the enqueue that follows are atomic
+    /// The handle in `math`, behind its mode lock, for cudakit's own GEMMs
     #[cfg(feature = "libraries")]
-    pub fn lock_blas(&self, math: Math) -> Result<MutexGuard<'_, Math>, Error> {
+    pub(crate) fn blas_in(&self, math: Math) -> Result<BlasGuard<'_>, Error> {
         self.profile.allow(Library::Cublas)?;
         // cuBLAS needs the handle's context current on every thread that calls it
         self.context.bind_to_thread()?;

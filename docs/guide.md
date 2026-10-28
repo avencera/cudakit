@@ -47,7 +47,8 @@ feature.
 
 If you call cuBLAS or cuDNN entry points directly, beyond cudakit's wrappers, list them
 in `extra_symbols`. The preflight then rejects a library that lacks them before cudarc
-loads it.
+loads it. `unsafe fn Gpu::blas(math)` hands out the shared cuBLAS handle under its mode
+lock; leave its pointer mode, math mode, stream and workspace as they are.
 
 ## 3. Kernel areas
 
@@ -151,8 +152,16 @@ captured address, and the buffers stay on the GPU's stream. The simplest way to 
 that is to store the graph beside the buffers' owner and launch it only through that
 owner. Dropping a graph only destroys driver handles, so a graph that can no longer be
 launched may outlive its buffers. If you reallocate buffers, drop or recapture every
-graph that recorded them before its next launch. `capture` returns `None` when the
-closure queued nothing, and a panic inside the closure leaves the stream capturing.
+graph that recorded them before its next launch.
+
+Replays record no cudarc events, so a buffer a replay touches stays allocated and on
+the GPU's stream until that replay finishes, and dropping the graph does not wait.
+cudarc frees a buffer in order on the stream it was allocated on, so buffers allocated
+on the GPU's stream may simply be dropped; synchronize the stream before touching one
+from another stream or freeing one allocated elsewhere. Buffers allocated inside the
+closure carry no events for their whole life.
+`capture` returns `None` when the closure queued nothing, and a panic inside the
+closure leaves the stream capturing.
 
 `Graph::as_cuda` exposes the cudarc graph if you need conditional nodes.
 

@@ -1,6 +1,7 @@
 //! Per-GPU fallible library cells, requested only while a consumer builds a plan
 
 use std::ffi::{CStr, OsStr};
+use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, ThreadId};
 
@@ -60,6 +61,25 @@ struct Dnn {
 unsafe impl Send for Dnn {}
 // SAFETY: see `Send`; a shared reference gives other threads nothing but `owner`
 unsafe impl Sync for Dnn {}
+
+/// The shared cuBLAS handle in one math mode, from [`Gpu::blas`](crate::Gpu::blas)
+///
+/// Holds the handle's mode lock until dropped, so keep it only around the calls that
+/// need it
+#[derive(Debug)]
+pub struct BlasGuard<'a> {
+    handle: &'a CudaBlas,
+    // private, so callers can read the mode only through the handle
+    _math: MutexGuard<'a, Math>,
+}
+
+impl Deref for BlasGuard<'_> {
+    type Target = CudaBlas;
+
+    fn deref(&self) -> &CudaBlas {
+        self.handle
+    }
+}
 
 /// Versions of the loaded numerical libraries, for tune-file identities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,14 +176,17 @@ impl Libraries {
         Ok(&dnn.handle)
     }
 
-    pub(crate) fn lock_blas(&self, math: Math) -> Result<MutexGuard<'_, Math>, Error> {
+    pub(crate) fn lock_blas(&self, math: Math) -> Result<BlasGuard<'_>, Error> {
         let blas = cached(self.blas.get().ok_or(unprepared(Library::Cublas))?)?;
         let mut current = blas.math.lock().unwrap_or_else(PoisonError::into_inner);
         if *current != math {
             set_math(&blas.handle, math)?;
             *current = math;
         }
-        Ok(current)
+        Ok(BlasGuard {
+            handle: &blas.handle,
+            _math: current,
+        })
     }
 }
 

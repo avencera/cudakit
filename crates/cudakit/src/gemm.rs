@@ -184,12 +184,12 @@ impl Gpu {
             check_len("sgemm b", spec.k.saturating_mul(spec.n), b.len())?;
             check_len("sgemm c", spec.m.saturating_mul(spec.n), c.len())?;
             let config = spec.column_major()?;
-            let _math = self.lock_blas(spec.math)?;
+            let blas = self.blas_in(spec.math)?;
 
             // SAFETY: the lengths match the dimensions and leading dimensions checked
             // above, and all buffers are device allocations that cudarc orders on the
             // handle's stream
-            unsafe { self.blas()?.gemm(config, b, a, c) }?;
+            unsafe { blas.gemm(config, b, a, c) }?;
             Ok(())
         }
         #[cfg(not(feature = "libraries"))]
@@ -248,11 +248,11 @@ impl Gpu {
                 stride_b: stride(spec.stride_a)?,
                 stride_c: stride(spec.stride_c)?,
             };
-            let _math = self.lock_blas(gemm.math)?;
+            let blas = self.blas_in(gemm.math)?;
 
             // SAFETY: each buffer holds the full strided span checked above, outputs do
             // not overlap, and cudarc orders the buffers on the handle's stream
-            unsafe { self.blas()?.gemm_strided_batched(config, b, a, c) }?;
+            unsafe { blas.gemm_strided_batched(config, b, a, c) }?;
             Ok(())
         }
         #[cfg(not(feature = "libraries"))]

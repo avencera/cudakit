@@ -10,8 +10,9 @@ use crate::{Error, Gpu};
 /// [`Self::launch`]: every launch must find them allocated at their captured addresses,
 /// so allocate them once and refill them instead of reallocating. Dropping the graph
 /// only destroys its driver handles, so a graph that is never launched again may
-/// outlive its buffers. Replays record no cudarc events, which is safe as long as the
-/// buffers are used only on this GPU's stream
+/// outlive its buffers. Replays record no cudarc events, so until a queued replay has
+/// finished its buffers must stay allocated and be used only on this GPU's stream;
+/// dropping the graph does not wait for it
 ///
 /// `Send` but not `Sync`: driver graph handles work from any thread, but CUDA forbids
 /// using one executable graph from two threads at once
@@ -56,11 +57,19 @@ impl Gpu {
     /// # Safety
     ///
     /// Every launch of the returned graph must find every buffer `enqueue` touched
-    /// still allocated at the address it had during capture, and those buffers must be
-    /// used only on this GPU's stream while the graph may still be launched; otherwise
-    /// a replay reads or writes freed device memory. Either keep the buffers alive and
-    /// in place for as long as the graph exists, or make it impossible to launch the
-    /// graph once any of them is freed or replaced
+    /// still allocated at the address it had during capture; otherwise a replay reads
+    /// or writes freed device memory. Either keep the buffers alive and in place for as
+    /// long as the graph exists, or make it impossible to launch the graph once any of
+    /// them is freed or replaced
+    ///
+    /// A replay records no cudarc events on the buffers it touches, so until every
+    /// queued replay has finished, those buffers must stay allocated and be used only
+    /// on this GPU's stream, which orders work after the replay. Dropping the graph
+    /// does not wait for a replay. cudarc frees a buffer in order on the stream it was
+    /// allocated on, so a buffer allocated on this GPU's stream may simply be dropped;
+    /// synchronize this stream before touching a buffer from another stream or freeing
+    /// one allocated elsewhere. Buffers that `enqueue` allocates carry no events for
+    /// their whole life, so they too stay on this stream
     ///
     /// No other thread may use this GPU until the capture returns: the stream records
     /// whatever any thread queues on it, so another thread's work would land in this
@@ -119,7 +128,7 @@ fn node_count(graph: &CudaGraph) -> Result<usize, Error> {
 /// record a new one. Inside a stream capture, waiting on an event recorded before the
 /// capture fails with `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`. The flag belongs to the
 /// context object and is read at each access
-pub struct EventTrackingPause<'a> {
+pub(crate) struct EventTrackingPause<'a> {
     context: &'a CudaContext,
     was_tracking: bool,
 }
@@ -131,8 +140,9 @@ impl<'a> EventTrackingPause<'a> {
     ///
     /// While the pause lives, every buffer of `context` that is touched must be used on
     /// one stream only, with no pending work from other streams, so stream order alone
-    /// provides the dependencies the events would have
-    pub unsafe fn new(context: &'a CudaContext) -> Self {
+    /// provides the dependencies the events would have. A buffer allocated during the
+    /// pause never gets events, so it must stay on that stream for its whole life
+    pub(crate) unsafe fn new(context: &'a CudaContext) -> Self {
         let was_tracking = context.is_event_tracking();
         // SAFETY: the caller upholds the single-stream contract above
         unsafe { context.disable_event_tracking() };

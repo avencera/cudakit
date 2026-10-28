@@ -13,7 +13,7 @@
 //! - [`DeviceTensor`] is a shaped device buffer
 //! - [`Sgemm`] and [`SgemmBatched`] describe row-major cuBLAS products
 //! - [`Gpu::capture`] records stream work as a replayable [`Graph`]
-//! - [`dnn`] plans cuDNN convolutions (feature `libraries`)
+//! - `dnn` plans cuDNN convolutions (feature `libraries`)
 //! - [`identity`] reads the driver release for persisted tuning identities
 //!
 //! Kernels are written with cuda-oxide in each consumer's own kernels crate and built
@@ -50,9 +50,9 @@ pub use device::DeviceAttributesBuilder;
 pub use error::{Error, Library, check_len, element_count, to_c_int};
 pub use gemm::{Math, Sgemm, SgemmBatched};
 pub use gpu::Gpu;
-pub use graph::{EventTrackingPause, Graph};
+pub use graph::Graph;
 #[cfg(feature = "libraries")]
-pub use libraries::LibraryVersions;
+pub use libraries::{BlasGuard, LibraryVersions};
 pub use profile::{ExtraSymbols, LibraryPolicy, Profile};
 pub use runtime::{LoadedKernels, Options, Runtime};
 pub use tensor::{DeviceTensor, unfold_windows};
