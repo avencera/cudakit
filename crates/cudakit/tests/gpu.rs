@@ -64,17 +64,25 @@ DONE:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Area {
     AddOne,
+    // ships only a tier above the profile's compiled set
+    Sm80Only,
 }
 
 impl KernelArea for Area {
     const PROFILE: &'static Profile = &PROFILE;
 
     fn name(self) -> &'static str {
-        "add-one"
+        match self {
+            Self::AddOne => "add-one",
+            Self::Sm80Only => "sm80-only",
+        }
     }
 
     fn variants(self) -> AreaPtx {
-        AreaPtx::fixture(&[(PtxTier::Sm75, ADD_ONE_PTX)])
+        match self {
+            Self::AddOne => AreaPtx::fixture(&[(PtxTier::Sm75, ADD_ONE_PTX)]),
+            Self::Sm80Only => AreaPtx::fixture(&[(PtxTier::Sm80, ADD_ONE_PTX)]),
+        }
     }
 }
 
@@ -179,6 +187,21 @@ fn embedded_ptx_loads_once_and_replays_in_a_graph() -> Result<(), Error> {
     graph.launch()?;
     graph.launch()?;
     assert!(stream.clone_dtoh(&data)?.iter().all(|value| *value == 2.0));
+    Ok(())
+}
+
+#[test]
+fn a_missing_area_variant_names_the_area_device_and_feature() -> Result<(), Error> {
+    let Some(runtime) = runtime() else {
+        return Ok(());
+    };
+    let error = runtime.load_embedded(Area::Sm80Only).unwrap_err();
+    assert!(matches!(error, Error::AreaTierNotCompiledIn {
+        area: "sm80-only", tier: PtxTier::Sm75, device, feature: "test-sm75"
+    } if device == runtime.compute_capability()));
+
+    let message = error.to_string();
+    assert!(message.contains("sm80-only") && message.contains("test-sm75"));
     Ok(())
 }
 
