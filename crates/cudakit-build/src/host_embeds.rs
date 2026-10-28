@@ -308,6 +308,11 @@ macro_rules! tier_ptx {
         // an embed in an invoked macro is real, so its masks are checked
         let invoked = "macro_rules! probe { () => { tier_ptx!([\"cuda-sm75\"], \"ptx/probe.sm80\", [80]) }; }\nprobe!();\n";
         let found = problems(&format!("{invoked}{}", host_source()));
-        assert!(found.iter().any(|problem| problem.contains("more than once")), "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("more than once")),
+            "{found:?}"
+        );
     }
 }

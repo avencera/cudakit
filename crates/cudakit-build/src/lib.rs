@@ -1331,8 +1331,8 @@ mod test_support {
 mod tests {
     use super::test_support::{PROJECT, probe};
     use super::{
-        ArtifactDirs, CubinArch, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS,
-        Project, Tier, Variant, check_entry_points, sha256_hex,
+        ArtifactDirs, CubinArch, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS, Project,
+        Tier, Variant, check_entry_points, sha256_hex,
     };
     use crate::Area;
 
@@ -1351,7 +1351,10 @@ mod tests {
             project.build(root, &[]).unwrap_err(),
             project.build_cubins(root, &[]).unwrap_err(),
         ] {
-            assert!(error.to_string().contains("strictly ascending"), "{error:#}");
+            assert!(
+                error.to_string().contains("strictly ascending"),
+                "{error:#}"
+            );
         }
     }
 
