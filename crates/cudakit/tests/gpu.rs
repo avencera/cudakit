@@ -1,14 +1,15 @@
-//! GPU checks of the shared host stack: module loading, graph capture and the cuBLAS
-//! products
+//! GPU checks of the shared host stack: module loading, graph capture, the cuBLAS
+//! products and cuDNN convolutions
 //!
 //! The tests touch the device only with `CUDAKIT_REQUIRE_GPU=1`, which also makes a
 //! missing GPU a failure so a GPU runner cannot silently pass. Without it they skip,
 //! so a workspace `cargo test` never takes a GPU that a scheduler hands out
 
 use cudakit::cudarc::driver::{LaunchConfig, PushKernelArg};
+use cudakit::dnn::{ConvPlanner, Residual};
 use cudakit::{
-    AreaPtx, Error, ExtraSymbols, Gpu, KernelArea, Library, LibraryPolicy, LoadedArtifact, Options,
-    Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
+    AreaPtx, Conv2d, Error, ExtraSymbols, Gpu, KernelArea, Library, LibraryPolicy, LoadedArtifact,
+    Math, Options, Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
 };
 
 const BASE: Profile = Profile {
@@ -27,40 +28,8 @@ static DRIVER_ONLY: Profile = Profile {
     ..BASE
 };
 
-// hand-written so the test needs no kernel toolchain; `data[i] += 1` for `i < len`
-const ADD_ONE_PTX: &str = r#"
-.version 7.0
-.target sm_75
-.address_size 64
-
-.visible .entry add_one(
-    .param .u64 data,
-    .param .u32 len
-)
-{
-    .reg .pred %p<2>;
-    .reg .b32 %r<6>;
-    .reg .f32 %f<3>;
-    .reg .b64 %rd<5>;
-
-    ld.param.u64 %rd1, [data];
-    ld.param.u32 %r1, [len];
-    mov.u32 %r2, %ctaid.x;
-    mov.u32 %r3, %ntid.x;
-    mov.u32 %r4, %tid.x;
-    mad.lo.s32 %r5, %r2, %r3, %r4;
-    setp.ge.u32 %p1, %r5, %r1;
-    @%p1 bra DONE;
-    cvta.to.global.u64 %rd2, %rd1;
-    mul.wide.u32 %rd3, %r5, 4;
-    add.s64 %rd4, %rd2, %rd3;
-    ld.global.f32 %f1, [%rd4];
-    add.f32 %f2, %f1, 0f3F800000;
-    st.global.f32 [%rd4], %f2;
-DONE:
-    ret;
-}
-"#;
+// hand-written so the tests need no kernel toolchain; `data[i] += 1` for `i < len`
+const ADD_ONE_PTX: &str = include_str!("fixtures/add_one.ptx");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Area {
@@ -128,6 +97,41 @@ fn reference(spec: Sgemm, a: &[f32], b: &[f32]) -> Vec<f32> {
             (0..k).map(|inner| at(row, inner) * bt(inner, col)).sum()
         })
         .collect()
+}
+
+/// NCHW cross-correlation on the host, as PyTorch's `Conv2d` computes it
+fn conv_reference(spec: &Conv2d, x: &[f32], w: &[f32]) -> Vec<f32> {
+    let [n, k, p, q] = spec.output_shape();
+    let [_, c, h, wi] = spec.input_shape();
+    let [r, s] = spec.kernel;
+    // input coordinate of output `out` and filter tap `tap`, or `None` in the padding
+    let source = |axis: usize, out: usize, tap: usize, limit: usize| {
+        let at = out * spec.stride[axis] + tap * spec.dilation[axis];
+        at.checked_sub(spec.padding[axis]).filter(|at| *at < limit)
+    };
+
+    let mut y = vec![0.0; n * k * p * q];
+    for (index, out) in y.iter_mut().enumerate() {
+        let (b, kk, pp, qq) = (
+            index / (k * p * q),
+            index / (p * q) % k,
+            index / q % p,
+            index % q,
+        );
+        for cc in 0..c {
+            for rr in 0..r {
+                for ss in 0..s {
+                    let (Some(hh), Some(ww)) = (source(0, pp, rr, h), source(1, qq, ss, wi)) else {
+                        continue;
+                    };
+                    *out +=
+                        x[((b * c + cc) * h + hh) * wi + ww] * w[((kk * c + cc) * r + rr) * s + ss];
+                }
+            }
+        }
+    }
+
+    y
 }
 
 fn values(len: usize, seed: usize) -> Vec<f32> {
@@ -429,6 +433,85 @@ fn batched_sgemm_matches_each_product() -> Result<(), Error> {
         ),
         Err(Error::Unsupported { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn cudnn_convolutions_match_the_host_reference() -> Result<(), Error> {
+    let Some(gpu) = opened(|| Gpu::open(0, &PROFILE, None)) else {
+        return Ok(());
+    };
+    let planner = match ConvPlanner::new(&gpu) {
+        Ok(planner) => planner,
+        Err(Error::LibraryUnavailable { .. }) => {
+            eprintln!("cuDNN is not installed: skipping");
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    // padding, stride and dilation differ per axis so a swapped axis cannot pass
+    let spec = Conv2d {
+        batch: 2,
+        in_channels: 3,
+        out_channels: 4,
+        input: [9, 8],
+        kernel: [3, 2],
+        padding: [1, 2],
+        stride: [2, 1],
+        dilation: [1, 2],
+        math: Math::Fp32,
+    };
+    let plan = planner.plan(spec)?;
+    let stream = gpu.stream();
+    let x = values(spec.input_shape().iter().product(), 3);
+    let w = values(spec.filter_shape().iter().product(), 4);
+    let len = spec.output_shape().iter().product();
+    let (bias, residual) = (values(spec.out_channels, 5), values(len, 6));
+    let expected = conv_reference(&spec, &x, &w);
+
+    let (x_device, w_device) = (stream.clone_htod(&x)?, stream.clone_htod(&w)?);
+    let (bias_device, residual_device) = (stream.clone_htod(&bias)?, stream.clone_htod(&residual)?);
+    let mut workspace = stream.alloc_zeros::<u8>(plan.workspace_bytes().max(1))?;
+    let mut y = stream.alloc_zeros::<f32>(len)?;
+    plan.forward(
+        &mut workspace.as_view_mut(),
+        &x_device.as_view(),
+        &w_device.as_view(),
+        &mut y.as_view_mut(),
+    )?;
+    assert_close(&stream.clone_dtoh(&y)?, &expected);
+
+    let per_channel = len / spec.batch / spec.out_channels;
+    let fused = |residual: Option<&[f32]>| -> Vec<f32> {
+        expected
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let add = residual.map_or(0.0, |residual| residual[index]);
+                (value + add + bias[index / per_channel % spec.out_channels]).max(0.0)
+            })
+            .collect()
+    };
+    for add in [false, true] {
+        let residual_view = residual_device.as_view();
+        let residual_arg = if add {
+            Residual::Add(&residual_view)
+        } else {
+            Residual::None {
+                scratch: &residual_view,
+            }
+        };
+        plan.forward_bias_relu(
+            &mut workspace.as_view_mut(),
+            &x_device.as_view(),
+            &w_device.as_view(),
+            &bias_device.as_view(),
+            residual_arg,
+            &mut y.as_view_mut(),
+        )?;
+        assert_close(&stream.clone_dtoh(&y)?, &fused(add.then_some(&residual)));
+    }
+
     Ok(())
 }
 
