@@ -22,8 +22,8 @@ with cuda-oxide and embedded as PTX plus exact-architecture cubins.
   and driver-only or library use), checked when the GPU opens
 - `DeviceTensor`: a shaped device buffer
 - `Sgemm` and `SgemmBatched`: row-major cuBLAS products with length checks
-- `Gpu::capture`: CUDA graph capture that pauses cudarc event tracking and always ends
-  the capture
+- `Gpu::capture`: CUDA graph capture that pauses cudarc event tracking and ends the
+  capture even when the enqueue fails
 - `dnn`: a cuDNN convolution planner
 - `identity`: the driver release, for persisted tuning keys
 - `cudakit-build`: the offline kernel toolchain library that consumers' xtasks call

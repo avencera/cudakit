@@ -122,14 +122,18 @@ A consumer:
 
 `unsafe fn Gpu::capture(enqueue) -> Result<Option<Graph>, E>` with
 `E: From<cudakit::Error>`. It is `unsafe` because the graph keeps raw pointers to the
-captured buffers, and nothing in the types ties their lifetimes to it. It synchronizes
-the stream, pauses cudarc event tracking (required, or capture fails with
-`CUDA_ERROR_STREAM_CAPTURE_ISOLATION`), captures thread-locally, always ends capture
-even when `enqueue` fails, and restores tracking. The driver ends an empty capture with
-a zero-node graph rather than none, so `capture` counts nodes and returns `None` for
-empty work; `capture_nonempty` makes that `Error::EmptyCapture`. `Graph::launch` replays
-on the same stream. This replaces three copies in speakrs. `Graph::as_cuda` exposes the
-cudarc graph for consumers that add conditional nodes later.
+captured buffers, and nothing in the types ties them to `Graph::launch`: the caller
+guarantees every launch finds them allocated in place. Dropping a graph only destroys
+its driver handles, so a consumer may keep a stale graph that can no longer be launched
+(speakrs's embedding storage does this with a generation token). It synchronizes the
+stream, pauses cudarc event tracking (required, or capture fails with
+`CUDA_ERROR_STREAM_CAPTURE_ISOLATION`), captures thread-locally, ends the capture even
+when `enqueue` returns an error (a panic unwinds without ending it), and restores
+tracking. The driver ends an empty capture with a zero-node graph rather than none, so
+`capture` counts nodes and returns `None` for empty work; `capture_nonempty` makes that
+`Error::EmptyCapture`. `Graph::launch` replays on the same stream. This replaces three
+copies in speakrs. `Graph::as_cuda` exposes the cudarc graph for consumers that add
+conditional nodes later.
 
 ## What scriptrs needs (Phase 3 in its plan)
 
@@ -139,7 +143,8 @@ cudarc graph for consumers that add conditional nodes later.
   API; add it when scriptrs has a measured need.
 - **Whole-encoder graph.** Allocate persistent `DeviceTensor`s per fixed chunk shape,
   run the encoder once eagerly so cuBLAS finishes lazy setup, then
-  `gpu.capture(|| encoder.enqueue(&gpu))` and `graph.launch()` per chunk batch.
+  `unsafe { gpu.capture(|| encoder.enqueue(&gpu)) }` and `graph.launch()` per chunk
+  batch.
   Prepare cuBLAS (`gpu.prepare(Library::Cublas)`) at model load, never inside capture.
 - **TDT decode on device.** First version: capture one decode step (predictor LSTM,
   joint, argmax, duration advance) as a graph and replay it without host syncs, reading

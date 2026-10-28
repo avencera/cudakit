@@ -127,7 +127,8 @@ overlap.
 ```rust
 // buffers allocated once; run eagerly first so cuBLAS finishes lazy setup
 encoder.enqueue(&runtime)?;
-// SAFETY: the encoder owns every captured buffer and drops this graph before them
+// SAFETY: the encoder owns every captured buffer and never reallocates them, and the
+// graph is launched only while the encoder is alive
 let graph = unsafe { runtime.capture_nonempty(|| encoder.enqueue(&runtime)) }?;
 for chunk in batches {
     input.copy_from_host(runtime.stream(), chunk)?;   // refill, never reallocate
@@ -136,10 +137,13 @@ for chunk in batches {
 ```
 
 The graph holds raw pointers to every captured buffer, which is why `capture` and
-`capture_nonempty` are `unsafe`: every buffer must outlive the graph at the same address
-and stay on the GPU's stream. Store the graph beside the buffers' owner, declared before
-the buffers (or dropped explicitly first). `capture` returns `None` when the closure
-queued nothing.
+`capture_nonempty` are `unsafe`: every launch must find each buffer allocated at its
+captured address, and the buffers stay on the GPU's stream. The simplest way to keep
+that is to store the graph beside the buffers' owner and launch it only through that
+owner. Dropping a graph only destroys driver handles, so a graph that can no longer be
+launched may outlive its buffers. If you reallocate buffers, drop or recapture every
+graph that recorded them before its next launch. `capture` returns `None` when the
+closure queued nothing, and a panic inside the closure leaves the stream capturing.
 
 ## What scriptrs should call (Phase 3)
 

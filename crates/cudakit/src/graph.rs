@@ -6,10 +6,12 @@ use crate::{Error, Gpu};
 /// A recorded and instantiated sequence of work on one [`Gpu`]'s stream
 ///
 /// The graph holds raw pointers to every buffer the captured work touched. Creating one
-/// is `unsafe` ([`Gpu::capture`]) because nothing ties those buffers' lifetimes to it:
-/// they must outlive it and keep their addresses, so allocate them once and refill them
-/// instead of reallocating. Replays record no cudarc events, which is safe as long as
-/// the buffers are used only on this GPU's stream
+/// is `unsafe` ([`Gpu::capture`]) because nothing ties those buffers' lifetimes to
+/// [`Self::launch`]: every launch must find them allocated at their captured addresses,
+/// so allocate them once and refill them instead of reallocating. Dropping the graph
+/// only destroys its driver handles, so a graph that is never launched again may
+/// outlive its buffers. Replays record no cudarc events, which is safe as long as the
+/// buffers are used only on this GPU's stream
 pub struct Graph(CudaGraph);
 
 impl std::fmt::Debug for Graph {
@@ -39,15 +41,18 @@ impl Gpu {
     /// it starts; finish lazy library setup and weight uploads before calling this.
     /// cudarc's per-buffer event tracking is paused during the capture, since waiting
     /// on an event recorded before the capture fails with
-    /// `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`. The capture always ends, so a failed
-    /// `enqueue` leaves the stream usable
+    /// `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`. The capture ends even when `enqueue`
+    /// returns an error, so a failed `enqueue` leaves the stream usable; a panic in
+    /// `enqueue` unwinds without ending it
     ///
     /// # Safety
     ///
-    /// Every buffer `enqueue` touches must stay allocated at the same address until the
-    /// returned graph is dropped, and must be used only on this GPU's stream while the
-    /// graph exists; otherwise a replay reads or writes freed device memory. Keep the
-    /// graph beside the buffers' owner and drop it first
+    /// Every launch of the returned graph must find every buffer `enqueue` touched
+    /// still allocated at the address it had during capture, and those buffers must be
+    /// used only on this GPU's stream while the graph may still be launched; otherwise
+    /// a replay reads or writes freed device memory. Either keep the buffers alive and
+    /// in place for as long as the graph exists, or make it impossible to launch the
+    /// graph once any of them is freed or replaced
     pub unsafe fn capture<E: From<Error>>(
         &self,
         enqueue: impl FnOnce() -> Result<(), E>,
@@ -62,7 +67,7 @@ impl Gpu {
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
             .map_err(Error::from)?;
         let enqueued = enqueue();
-        // always end the capture, so a failed enqueue leaves the stream usable
+        // end the capture even on error, so a failed enqueue leaves the stream usable
         let graph = stream.end_capture(CUgraphInstantiate_flags(0));
         enqueued?;
 
