@@ -9,7 +9,7 @@ use cudakit::cudarc::driver::{LaunchConfig, PushKernelArg};
 use cudakit::dnn::{ConvPlanner, Residual};
 use cudakit::{
     AreaPtx, Conv2d, Error, ExtraSymbols, Gpu, KernelArea, Library, LibraryPolicy, LoadedArtifact,
-    Math, Options, Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
+    Math, ModuleRequest, Options, Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
 };
 
 const BASE: Profile = Profile {
@@ -207,6 +207,27 @@ fn a_missing_area_variant_names_the_area_device_and_feature() -> Result<(), Erro
 
     let message = error.to_string();
     assert!(message.contains("sm80-only") && message.contains("test-sm75"));
+
+    // an explicit request cannot step over the limit either, even for an embedded variant
+    let sm80 = Area::Sm80Only
+        .variants()
+        .embedded(PtxTier::Sm80)
+        .expect("sm80 fixture");
+    let request = ModuleRequest::new(
+        Area::Sm80Only,
+        PtxTier::Sm80,
+        LoadedArtifact::PtxJit {
+            sha256: sm80.sha256(),
+        },
+    );
+    assert!(matches!(
+        runtime.load(request),
+        Err(Error::TierAboveLimit {
+            area: "sm80-only",
+            tier: PtxTier::Sm80,
+            limit: PtxTier::Sm75
+        })
+    ));
     Ok(())
 }
 
@@ -277,30 +298,32 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
     let (a, b) = (values(9, 5), values(9, 6));
     let (a_device, b_device) = (stream.clone_htod(&a)?, stream.clone_htod(&b)?);
     let mut c = stream.alloc_zeros::<f32>(9)?;
-    // a fresh thread's first calls are a cached kernel lookup and a GEMM, neither of
-    // which binds the context inside cudarc. The graph moves to the worker, since it
-    // is `Send` but not `Sync`
+    // cudarc binds the context for neither a GEMM nor a cached kernel lookup, so each
+    // runs first on its own fresh thread. The graph moves to a worker, since it is
+    // `Send` but not `Sync`
     let shared = &runtime;
     let c_device = &mut c;
     std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                shared.load_embedded(Area::AddOne)?.function("add_one")?;
-                shared.sgemm(spec, &a_device, &b_device, c_device)?;
-                if cudnn {
-                    assert!(matches!(
-                        shared.dnn(),
-                        Err(Error::LibraryOnAnotherThread {
-                            library: Library::Cudnn
-                        })
-                    ));
-                }
+        let lookup = scope.spawn(move || {
+            shared.load_embedded(Area::AddOne)?.function("add_one")?;
+            Ok::<_, Error>(())
+        });
+        let gemm = scope.spawn(move || {
+            shared.sgemm(spec, &a_device, &b_device, c_device)?;
+            if cudnn {
+                assert!(matches!(
+                    shared.dnn(),
+                    Err(Error::LibraryOnAnotherThread {
+                        library: Library::Cudnn
+                    })
+                ));
+            }
 
-                graph.launch()?;
-                Ok::<_, Error>(())
-            })
-            .join()
-            .expect("worker thread panicked")
+            graph.launch()?;
+            Ok::<_, Error>(())
+        });
+        lookup.join().expect("lookup thread panicked")?;
+        gemm.join().expect("gemm thread panicked")
     })?;
 
     assert_close(&stream.clone_dtoh(&c)?, &reference(spec, &a, &b));

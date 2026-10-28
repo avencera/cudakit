@@ -13,10 +13,12 @@ First release.
 - `Profile` and `LibraryPolicy`: build policy checked at open, including driver-only
   operation that refuses every library before anything is looked up
 - cuBLAS and cuDNN loaded at run time after a symbol preflight (feature `libraries`)
-- `Sgemm` and `SgemmBatched`: row-major products with length checks
+- `Sgemm` and `SgemmBatched`: row-major products with length checks, and
+  `unsafe fn Gpu::blas` for other cuBLAS calls on the shared handle
 - `Gpu::capture` and `Graph`: graph capture that pauses cudarc's event tracking and
   detects empty captures
-- `dnn`: a deterministic cuDNN convolution planner with fused bias, residual and ReLU
+- `dnn`: a deterministic cuDNN convolution planner with fused bias, residual and ReLU,
+  and `Conv2d::check` for convolution geometry
 - `DeviceTensor`, `unfold_windows` and `identity::DriverRelease`
 
 ### cudakit-build

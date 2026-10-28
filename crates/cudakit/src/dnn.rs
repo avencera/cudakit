@@ -89,6 +89,10 @@ impl ConvPlan {
 
     /// Runs `y = relu(conv(x, w) + residual + bias)` as one cuDNN call
     ///
+    /// The ReLU propagates NaN, like ONNX's `Relu`. cuDNN documents only the
+    /// NaN-to-zero ReLU for this call; cuDNN 9.27 accepts this one, and a release
+    /// that refuses it returns an error here
+    ///
     /// For the implicit-GEMM algorithms cuDNN applies the bias, residual and ReLU
     /// in the convolution's own epilogue, which saves a full read and write of the
     /// activation compared with a separate kernel
@@ -204,8 +208,12 @@ impl<'a> ConvPlanner<'a> {
         })
     }
 
-    /// Plans `spec` with the chosen algorithm
+    /// Plans `spec` with the chosen algorithm, after [`Conv2d::check`] accepts it
     pub fn plan(&self, spec: Conv2d) -> Result<ConvPlan, Error> {
+        spec.check()?;
+        // the query handle belongs to this GPU's context, and the thread may have made
+        // another one current since the planner was created
+        self.gpu.context().bind_to_thread()?;
         let ranked = self.rank(&spec)?;
         let (algo, math_type) = choose(&ranked, spec.math).unwrap_or((
             // implicit GEMM supports every FP32 NCHW convolution without workspace
@@ -229,7 +237,10 @@ impl<'a> ConvPlanner<'a> {
         let y = dnn.create_4d_tensor::<f32>(nchw, dims(spec.output_shape())?)?;
         let channels = to_c_int("conv2d", spec.out_channels)?;
         let bias = dnn.create_4d_tensor::<f32>(nchw, [1, channels, 1, 1])?;
-        // NaN propagates, matching the ONNX graphs' Relu
+        // NaN propagates, matching ONNX's Relu and consumers' own kernels. The fused
+        // call's documentation lists anything but CUDNN_NOT_PROPAGATE_NAN as
+        // unsupported, though cuDNN 9.27 runs it; a release that enforces that fails
+        // `forward_bias_relu` with a cuDNN error rather than changing results
         let relu = dnn.create_activation::<f32>(
             cudnnActivationMode_t::CUDNN_ACTIVATION_RELU,
             cudnnNanPropagation_t::CUDNN_PROPAGATE_NAN,

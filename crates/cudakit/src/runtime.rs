@@ -85,10 +85,19 @@ impl<K: KernelArea> Runtime<K> {
     }
 
     /// Loads exactly `request`; a cached module with another identity is an error, never
-    /// a replacement, and a driver refusal never tries the other artifact format
+    /// a replacement, and a driver refusal never tries the other artifact format. A
+    /// request above the runtime's tier limit fails with [`Error::TierAboveLimit`]
     pub fn load(&self, request: ModuleRequest<K>) -> Result<LoadedKernels<K>, Error> {
         let area = request.area();
         let tier = request.tier();
+        if tier > self.ptx_tier() {
+            return Err(Error::TierAboveLimit {
+                area: area.name(),
+                tier,
+                limit: self.ptx_tier(),
+            });
+        }
+
         let requested = request.artifact();
         let unavailable = |artifact| Error::ArtifactUnavailable {
             module: area.name(),

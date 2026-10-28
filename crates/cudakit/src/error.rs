@@ -90,6 +90,16 @@ pub enum Error {
         /// Consumer Cargo feature that embeds a runnable variant
         feature: &'static str,
     },
+    /// A module request names a tier above the runtime's PTX tier limit
+    #[error("CUDA area {area} requested tier {tier}, above this runtime's {limit} limit")]
+    TierAboveLimit {
+        /// Kernel area of the request
+        area: &'static str,
+        /// Tier the request names
+        tier: PtxTier,
+        /// Runtime's PTX tier limit
+        limit: PtxTier,
+    },
     /// The requested device does not exist
     #[error("CUDA device {ordinal} is not available; {count} device(s) found")]
     NoDevice {
