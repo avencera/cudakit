@@ -5,10 +5,11 @@ use crate::{Error, Gpu};
 
 /// A recorded and instantiated sequence of work on one [`Gpu`]'s stream
 ///
-/// The graph holds raw pointers to every buffer the captured work touched, so those
-/// buffers must outlive it and keep their addresses: allocate them once and refill
-/// them instead of reallocating. Replays record no cudarc events, which is safe as long
-/// as the buffers are used only on this GPU's stream
+/// The graph holds raw pointers to every buffer the captured work touched. Creating one
+/// is `unsafe` ([`Gpu::capture`]) because nothing ties those buffers' lifetimes to it:
+/// they must outlive it and keep their addresses, so allocate them once and refill them
+/// instead of reallocating. Replays record no cudarc events, which is safe as long as
+/// the buffers are used only on this GPU's stream
 pub struct Graph(CudaGraph);
 
 impl std::fmt::Debug for Graph {
@@ -40,7 +41,14 @@ impl Gpu {
     /// on an event recorded before the capture fails with
     /// `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`. The capture always ends, so a failed
     /// `enqueue` leaves the stream usable
-    pub fn capture<E: From<Error>>(
+    ///
+    /// # Safety
+    ///
+    /// Every buffer `enqueue` touches must stay allocated at the same address until the
+    /// returned graph is dropped, and must be used only on this GPU's stream while the
+    /// graph exists; otherwise a replay reads or writes freed device memory. Keep the
+    /// graph beside the buffers' owner and drop it first
+    pub unsafe fn capture<E: From<Error>>(
         &self,
         enqueue: impl FnOnce() -> Result<(), E>,
     ) -> Result<Option<Graph>, E> {
@@ -66,11 +74,16 @@ impl Gpu {
     }
 
     /// Like [`Self::capture`], but an empty capture is [`Error::EmptyCapture`]
-    pub fn capture_nonempty<E: From<Error>>(
+    ///
+    /// # Safety
+    ///
+    /// The same contract as [`Self::capture`]
+    pub unsafe fn capture_nonempty<E: From<Error>>(
         &self,
         enqueue: impl FnOnce() -> Result<(), E>,
     ) -> Result<Graph, E> {
-        Ok(self.capture(enqueue)?.ok_or(Error::EmptyCapture)?)
+        // SAFETY: the caller upholds the buffer contract for the returned graph
+        Ok(unsafe { self.capture(enqueue) }?.ok_or(Error::EmptyCapture)?)
     }
 }
 

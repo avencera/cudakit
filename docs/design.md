@@ -119,14 +119,16 @@ A consumer:
 
 ### Graph capture
 
-`Gpu::capture(enqueue) -> Result<Option<Graph>, E>` with `E: From<cudakit::Error>`:
-synchronizes the stream, pauses cudarc event tracking (required, or capture fails with
+`unsafe fn Gpu::capture(enqueue) -> Result<Option<Graph>, E>` with
+`E: From<cudakit::Error>`. It is `unsafe` because the graph keeps raw pointers to the
+captured buffers, and nothing in the types ties their lifetimes to it. It synchronizes
+the stream, pauses cudarc event tracking (required, or capture fails with
 `CUDA_ERROR_STREAM_CAPTURE_ISOLATION`), captures thread-locally, always ends capture
 even when `enqueue` fails, and restores tracking. The driver ends an empty capture with
 a zero-node graph rather than none, so `capture` counts nodes and returns `None` for
-empty work; `capture_nonempty` makes that `Error::EmptyCapture`. `Graph::launch` replays on the same
-stream. This replaces three copies in speakrs. `Graph::as_cuda` exposes the cudarc graph
-for consumers that add conditional nodes later.
+empty work; `capture_nonempty` makes that `Error::EmptyCapture`. `Graph::launch` replays
+on the same stream. This replaces three copies in speakrs. `Graph::as_cuda` exposes the
+cudarc graph for consumers that add conditional nodes later.
 
 ## What scriptrs needs (Phase 3 in its plan)
 

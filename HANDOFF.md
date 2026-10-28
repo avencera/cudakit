@@ -12,7 +12,7 @@ why things are shaped this way.
 | `DeviceTensor`, `unfold_windows` | Stable |
 | `Sgemm`, `Gpu::sgemm` | Stable. Moved unchanged from speakrs |
 | `SgemmBatched`, `Gpu::sgemm_batched` | New. Covered by GPU tests in `crates/cudakit/tests/gpu.rs`, but no production consumer yet |
-| `Gpu::capture`, `capture_nonempty`, `Graph` | Stable. All three speakrs capture sites use them |
+| `Gpu::capture`, `capture_nonempty`, `Graph` | Stable. All three speakrs capture sites use them. Capture became `unsafe` after `0a36e85` |
 | `dnn::{ConvPlanner, ConvPlan, Residual}`, `Conv2d` | Stable. speakrs's convolution fallback |
 | `identity::{DriverIdentity, DriverRelease}` | Stable |
 | `Error` | `#[non_exhaustive]`. New variants may appear |
@@ -127,15 +127,19 @@ overlap.
 ```rust
 // buffers allocated once; run eagerly first so cuBLAS finishes lazy setup
 encoder.enqueue(&runtime)?;
-let graph = runtime.capture_nonempty(|| encoder.enqueue(&runtime))?;
+// SAFETY: the encoder owns every captured buffer and drops this graph before them
+let graph = unsafe { runtime.capture_nonempty(|| encoder.enqueue(&runtime)) }?;
 for chunk in batches {
     input.copy_from_host(runtime.stream(), chunk)?;   // refill, never reallocate
     graph.launch()?;
 }
 ```
 
-The graph holds raw pointers to every captured buffer, so keep each buffer alive and
-at the same address. `capture` returns `None` when the closure queued nothing.
+The graph holds raw pointers to every captured buffer, which is why `capture` and
+`capture_nonempty` are `unsafe`: every buffer must outlive the graph at the same address
+and stay on the GPU's stream. Store the graph beside the buffers' owner, declared before
+the buffers (or dropped explicitly first). `capture` returns `None` when the closure
+queued nothing.
 
 ## What scriptrs should call (Phase 3)
 

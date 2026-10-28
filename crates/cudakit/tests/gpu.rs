@@ -172,13 +172,15 @@ fn embedded_ptx_loads_once_and_replays_in_a_graph() -> Result<(), Error> {
     // allocated and written before the capture, so a tracked buffer would wait on a
     // pre-capture event inside it
     let mut data = stream.clone_htod(&vec![0.0_f32; len as usize])?;
-    let graph = runtime.capture_nonempty(|| {
+    let enqueue = || {
         let mut launch = stream.launch_builder(&function);
         launch.arg(&mut data).arg(&len);
         // SAFETY: the kernel reads and writes `len` floats of `data`, which holds that many
         unsafe { launch.launch(LaunchConfig::for_num_elems(len)) }?;
         Ok::<(), Error>(())
-    })?;
+    };
+    // SAFETY: `data` is declared before `graph`, so it outlives it, and stays on this stream
+    let graph = unsafe { runtime.capture_nonempty(enqueue) }?;
     assert!(
         stream.clone_dtoh(&data)?.iter().all(|value| *value == 0.0),
         "capture must record, not run"
@@ -210,18 +212,21 @@ fn capture_reports_empty_work_and_survives_a_failed_enqueue() -> Result<(), Erro
     let Some(runtime) = runtime() else {
         return Ok(());
     };
-    assert!(runtime.capture(|| Ok::<(), Error>(()))?.is_none());
+    // SAFETY: none of these captures touch a buffer
+    assert!(unsafe { runtime.capture(|| Ok::<(), Error>(())) }?.is_none());
     assert!(matches!(
-        runtime.capture_nonempty(|| Ok::<(), Error>(())),
+        unsafe { runtime.capture_nonempty(|| Ok::<(), Error>(())) },
         Err(Error::EmptyCapture)
     ));
 
-    let failed = runtime.capture(|| {
-        Err::<(), Error>(Error::Unsupported {
-            context: "test",
-            reason: "enqueue failed".into(),
+    let failed = unsafe {
+        runtime.capture(|| {
+            Err::<(), Error>(Error::Unsupported {
+                context: "test",
+                reason: "enqueue failed".into(),
+            })
         })
-    });
+    };
     assert!(matches!(failed, Err(Error::Unsupported { .. })));
 
     // the stream left capture mode, so ordinary work still runs
