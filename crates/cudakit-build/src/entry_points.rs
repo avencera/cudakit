@@ -63,12 +63,21 @@ fn find_directive(text: &str, directive: &str) -> Option<usize> {
         })
 }
 
-/// `.param .u64 .ptr .align 4 k_param_1` becomes `.param .u64 .ptr .align 4`
+/// `.param .u64 .ptr .align 4 k_param_1` becomes `.param .u64 .ptr .align 4`, and
+/// `.param .align 8 .b8 k_param_2[16]` keeps its size as `.param .align 8 .b8 [16]`,
+/// since a by-value argument's size is part of the kernel ABI
 fn parse_params(list: &str) -> Vec<String> {
     list.split(',')
         .map(|param| {
-            let tokens: Vec<_> = param.split_whitespace().collect();
-            tokens[..tokens.len().saturating_sub(1)].join(" ")
+            let joined = param.split_whitespace().collect::<Vec<_>>().join(" ");
+            let (declaration, array) = match joined.find('[') {
+                Some(open) => (joined[..open].trim_end(), Some(&joined[open..])),
+                None => (joined.as_str(), None),
+            };
+            let mut tokens: Vec<_> = declaration.split(' ').collect();
+            tokens.pop();
+            tokens.extend(array);
+            tokens.join(" ")
         })
         .filter(|param| !param.is_empty())
         .collect()
@@ -121,5 +130,17 @@ mod tests {
             entries["probe_scale_add"],
             [".param .f32", ".param .u64 .ptr .align 4", ".param .u64"]
         );
+    }
+
+    #[test]
+    fn by_value_parameter_sizes_stay_in_the_signature() {
+        let entry = |size: usize| {
+            format!(
+                ".version 8.0\n.target sm_75\n.visible .entry k(\n\t.param .align 8 .b8 k_param_0[{size}],\n\t.param .u32 k_param_1\n)\n{{\n\tret;\n}}\n"
+            )
+        };
+        let small = entry_points(&entry(8)).expect("parse");
+        assert_eq!(small["k"], [".param .align 8 .b8 [8]", ".param .u32"]);
+        assert_ne!(small, entry_points(&entry(16)).expect("parse"));
     }
 }
