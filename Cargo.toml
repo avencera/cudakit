@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/cudakit"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/avencera/cudakit"
+authors = ["Praveen Perera"]
+
+[workspace.dependencies]
+cudarc = { version = "0.19.10", default-features = false, features = [
+    "std",
+    "driver",
+    # the precompiled `Ptx` type requires this feature but does not load NVRTC
+    "nvrtc",
+    "dynamic-loading",
+    # the 12.4 API floor keeps CUDA 12.4 drivers working; PTX is JIT-compiled by the driver
+    "cuda-12040",
+] }
