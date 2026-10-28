@@ -53,6 +53,10 @@ cargo test --workspace --all-features
 CUDAKIT_REQUIRE_GPU=1 cargo test -p cudakit --features "libraries test-support" --test gpu
 ```
 
+`scripts/setup-gpu-box.sh` prepares an Ubuntu 24.04 NVIDIA box to build cuda-oxide
+kernels: CUDA 13, LLVM 21, the pinned nightly and cargo-oxide under `/workspace`.
+Consumers wrap it with their own pins and a probe build of their kernel crate.
+
 See `docs/design.md` for the design and `HANDOFF.md` for the consumer recipe.
 
 ## License
