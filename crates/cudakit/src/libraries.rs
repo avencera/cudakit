@@ -55,7 +55,8 @@ struct Dnn {
 // SAFETY: other threads never reach `handle` except to drop it: `Libraries::dnn`
 // returns it only on `owner`. Dropping on another thread only decrements the atomic
 // count, and a final drop there destroys the handle when no clone, and so no use on
-// `owner`, remains; cuDNN allows that from any thread
+// `owner`, remains; cuDNN allows that from any thread, and `Gpu`'s drop binds the
+// context first
 unsafe impl Send for Dnn {}
 // SAFETY: see `Send`; a shared reference gives other threads nothing but `owner`
 unsafe impl Sync for Dnn {}

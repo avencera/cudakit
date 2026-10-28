@@ -153,11 +153,17 @@ impl Gpu {
         }
     }
 
-    /// The already prepared cuBLAS handle
+    /// The already prepared cuBLAS handle, with this GPU's context bound to the
+    /// calling thread
+    ///
+    /// cudarc's cuBLAS calls do not bind the context themselves, so a thread that
+    /// makes another context current before calling the handle must bind this one again
     #[cfg(feature = "libraries")]
     pub fn blas(&self) -> Result<&CudaBlas, Error> {
         self.profile.allow(Library::Cublas)?;
-        self.libraries.blas()
+        let blas = self.libraries.blas()?;
+        self.context.bind_to_thread()?;
+        Ok(blas)
     }
 
     /// Selects `math` on the prepared cuBLAS handle and holds the mode lock, so mode
@@ -165,6 +171,8 @@ impl Gpu {
     #[cfg(feature = "libraries")]
     pub fn lock_blas(&self, math: Math) -> Result<MutexGuard<'_, Math>, Error> {
         self.profile.allow(Library::Cublas)?;
+        // cuBLAS needs the handle's context current on every thread that calls it
+        self.context.bind_to_thread()?;
         self.libraries.lock_blas(math)
     }
 
@@ -177,7 +185,10 @@ impl Gpu {
     #[cfg(feature = "libraries")]
     pub fn dnn(&self) -> Result<&Arc<Cudnn>, Error> {
         self.profile.allow(Library::Cudnn)?;
-        self.libraries.dnn()
+        let dnn = self.libraries.dnn()?;
+        // cudarc's cuDNN calls do not bind the context either
+        self.context.bind_to_thread()?;
+        Ok(dnn)
     }
 
     /// Prepares cuBLAS and cuDNN and reports their versions
@@ -257,6 +268,8 @@ impl Gpu {
             return Ok(0);
         }
 
+        // cudarc's occupancy query does not bind the context
+        self.context.bind_to_thread()?;
         let per_sm = function.occupancy_max_active_blocks_per_multiprocessor(
             block_threads,
             dynamic_smem,
@@ -311,6 +324,16 @@ impl Gpu {
     pub fn synchronize(&self) -> Result<(), Error> {
         self.stream.synchronize()?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "libraries")]
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        // the library handles are destroyed next, and the last `Gpu` may drop on a
+        // thread where this context was never current. Destroying is best effort, so a
+        // failed bind is left for the destroy calls to report
+        let _ = self.context.bind_to_thread();
     }
 }
 

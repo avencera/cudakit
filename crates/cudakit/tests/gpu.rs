@@ -271,15 +271,21 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
 
     let spec = Sgemm::new(3, 3, 3);
     let (a, b) = (values(9, 5), values(9, 6));
-    // the graph moves to the worker, since it is `Send` but not `Sync`
-    let (shared, a_host, b_host) = (&runtime, &a, &b);
-    let product = std::thread::scope(|scope| {
+    let (a_device, b_device) = (stream.clone_htod(&a)?, stream.clone_htod(&b)?);
+    let mut c = stream.alloc_zeros::<f32>(9)?;
+    // a fresh thread's first calls are a cached kernel lookup and a GEMM, neither of
+    // which binds the context inside cudarc. The graph moves to the worker, since it
+    // is `Send` but not `Sync`
+    let shared = &runtime;
+    let c_device = &mut c;
+    std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let (runtime, stream) = (shared, shared.stream());
+                shared.load_embedded(Area::AddOne)?.function("add_one")?;
+                shared.sgemm(spec, &a_device, &b_device, c_device)?;
                 if cudnn {
                     assert!(matches!(
-                        runtime.dnn(),
+                        shared.dnn(),
                         Err(Error::LibraryOnAnotherThread {
                             library: Library::Cudnn
                         })
@@ -287,20 +293,23 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
                 }
 
                 graph.launch()?;
-                let mut c = stream.alloc_zeros::<f32>(9)?;
-                let (a, b) = (stream.clone_htod(a_host)?, stream.clone_htod(b_host)?);
-                runtime.sgemm(spec, &a, &b, &mut c)?;
-                Ok::<_, Error>(stream.clone_dtoh(&c)?)
+                Ok::<_, Error>(())
             })
             .join()
             .expect("worker thread panicked")
     })?;
 
-    assert_close(&product, &reference(spec, &a, &b));
+    assert_close(&stream.clone_dtoh(&c)?, &reference(spec, &a, &b));
     assert!(stream.clone_dtoh(&data)?.iter().all(|value| *value == 1.0));
     if cudnn {
         runtime.dnn()?;
     }
+
+    // the last handle to the libraries drops on a thread that never used the GPU
+    drop((function, data, c));
+    std::thread::spawn(move || drop(runtime))
+        .join()
+        .expect("drop thread panicked");
     Ok(())
 }
 

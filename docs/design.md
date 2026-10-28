@@ -219,4 +219,7 @@ and CoreML builds stay free of cudarc.
   `Gpu::dnn` returns it only on the thread that prepared cuDNN, so its `!Send` clones
   never leave that thread. speakrs prepares and uses cuDNN on one worker thread, so its
   behavior is unchanged. `Graph` is `Send` only, since CUDA forbids launching one
-  executable graph from two threads at once.
+  executable graph from two threads at once. A context is current per thread, and
+  cudarc binds it for allocations, copies, launches and graphs but not for cuBLAS,
+  cuDNN, function lookup or occupancy queries, so cudakit binds before each of those
+  and before the library handles are destroyed in `Gpu`'s drop.

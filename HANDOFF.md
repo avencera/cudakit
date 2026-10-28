@@ -8,7 +8,7 @@ why things are shaped this way.
 | Part | Status |
 | --- | --- |
 | `Gpu`, `Runtime<K>`, `Options`, `Profile`, `LibraryPolicy`, `ExtraSymbols` | Stable for consumers. speakrs runs on it |
-| `KernelArea`, `AreaPtx`, `EmbeddedPtx`, `EmbeddedCubin`, `embed_tier!`, `ModuleRequest`, `LoadedKernels` | Stable. speakrs's module registry is built on it |
+| `KernelArea`, `AreaPtx`, `EmbeddedPtx`, `EmbeddedCubin`, `embed_tier!`, `ModuleRequest`, `LoadedKernels` | Stable. speakrs's module registry is built on it. `LoadedKernels::from_module` took a context argument after `a2b1ddd` |
 | `DeviceTensor`, `unfold_windows` | Stable |
 | `Sgemm`, `Gpu::sgemm` | Stable. Moved unchanged from speakrs |
 | `SgemmBatched`, `Gpu::sgemm_batched` | New. Covered by GPU tests in `crates/cudakit/tests/gpu.rs`, but no production consumer yet |
@@ -106,7 +106,9 @@ let softmax = kernels.function("softmax_rows")?;      // PTX entry name = Rust f
 its one stream.
 
 `Runtime` and `Gpu` are `Send + Sync`, so a loaded model can move to a worker thread or
-sit behind an `Arc<Mutex<..>>`. `Graph` is `Send` but not `Sync`. Two limits:
+sit behind an `Arc<Mutex<..>>`. `Graph` is `Send` but not `Sync`. cudakit binds the
+GPU's context on whichever thread calls it, so a fresh worker needs no setup. Two
+limits:
 
 - Capture needs the GPU to itself: the stream records whatever any thread queues
   during the capture, so serialize capture against other work on the same `Runtime`

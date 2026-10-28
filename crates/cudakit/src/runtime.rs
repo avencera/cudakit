@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use cudarc::driver::{CudaFunction, CudaModule};
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
@@ -126,6 +126,7 @@ impl<K: KernelArea> Runtime<K> {
         debug!(area = area.name(), %tier, capability = %self.compute_capability(), ?artifact, "Loaded CUDA artifact");
         let loaded = LoadedKernels {
             request: ModuleRequest::new(area, tier, artifact),
+            context: context.clone(),
             inner,
             ptx_sha256,
         };
@@ -148,20 +149,25 @@ impl<K: KernelArea> Deref for Runtime<K> {
 #[derive(Debug, Clone)]
 pub struct LoadedKernels<K> {
     request: ModuleRequest<K>,
+    // cudarc's function lookup does not bind the module's context, and a cached or
+    // moved module may be used first on a thread where it is not current
+    context: Arc<CudaContext>,
     inner: Arc<CudaModule>,
     ptx_sha256: ArtifactHash,
 }
 
 impl<K: KernelArea> LoadedKernels<K> {
     /// Wraps a module that the caller loaded itself, such as an artifact proof that
-    /// loads every embedded variant
+    /// loads every embedded variant. `context` must be the one `inner` was loaded into
     pub fn from_module(
+        context: Arc<CudaContext>,
         request: ModuleRequest<K>,
         inner: Arc<CudaModule>,
         ptx_sha256: ArtifactHash,
     ) -> Self {
         Self {
             request,
+            context,
             inner,
             ptx_sha256,
         }
@@ -189,6 +195,7 @@ impl<K: KernelArea> LoadedKernels<K> {
 
     /// Looks up a kernel by its PTX entry name, which is the Rust function name
     pub fn function(&self, kernel: &str) -> Result<CudaFunction, Error> {
+        self.context.bind_to_thread()?;
         self.inner
             .load_function(kernel)
             .map_err(|source| Error::KernelMissing {
