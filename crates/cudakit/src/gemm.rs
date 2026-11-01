@@ -17,6 +17,7 @@ use crate::{Error, Gpu, Library};
 /// Exhaustive on purpose: consumers persist the mode in tuning identities and must map
 /// every variant, so adding one is a breaking change
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Math {
     /// Full FP32 multiply and accumulate; tensor cores only where they keep FP32
     /// precision; never FP16 operands

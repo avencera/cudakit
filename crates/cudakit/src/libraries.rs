@@ -8,18 +8,22 @@ use std::thread::{self, ThreadId};
 use libloading::Library as SharedObject;
 
 use cudarc::cublas::{CudaBlas, result::CublasError};
+use cudarc::cublaslt::result::{self as lt, CublasError as LtError};
+use cudarc::cublaslt::sys::cublasLtHandle_t;
 use cudarc::cudnn::{Cudnn, CudnnError};
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaSlice, CudaStream, DriverError};
 
 use crate::profile::Profile;
-use crate::symbols::{CUBLAS, CUDNN, NVRTC};
+use crate::symbols::{CUBLAS, CUBLASLT, CUDNN, NVRTC};
 use crate::{Error, Library, Math};
 
 #[derive(Debug, Clone, Copy)]
 enum Failure {
     Missing(Library),
     Blas(CublasError),
+    Lt(LtError),
     Dnn(CudnnError),
+    Driver(DriverError),
 }
 
 impl From<Failure> for Error {
@@ -27,7 +31,9 @@ impl From<Failure> for Error {
         match failure {
             Failure::Missing(library) => Self::LibraryUnavailable { library },
             Failure::Blas(error) => Self::Cublas(error),
+            Failure::Lt(error) => Self::CublasLt(error),
             Failure::Dnn(error) => Self::Cudnn(error),
+            Failure::Driver(error) => Self::Driver(error),
         }
     }
 }
@@ -39,6 +45,38 @@ struct Blas {
     math: Mutex<Math>,
     // drop the handle before releasing the checked shared object
     _library: SharedObject,
+}
+
+/// Bytes of the workspace every [`MatmulPlan`](crate::MatmulPlan) may use, the size
+/// NVIDIA recommends for Hopper and newer; split-K algorithms keep partial sums in it
+pub const MATMUL_WORKSPACE_BYTES: usize = 32 << 20;
+
+/// The shared cuBLASLt handle and the workspace its products use
+///
+/// One workspace serves every plan: products run in order on the GPU's stream, so two
+/// never use it at once, and a captured graph keeps pointing at the same allocation
+#[derive(Debug)]
+pub(crate) struct Lt {
+    pub(crate) handle: LtHandle,
+    pub(crate) workspace: CudaSlice<u8>,
+    _library: SharedObject,
+}
+
+#[derive(Debug)]
+pub(crate) struct LtHandle(pub(crate) cublasLtHandle_t);
+
+// SAFETY: a cuBLASLt handle holds no per-thread state and `cublasLtMatmul` may run on
+// one handle from several threads at once; cudakit never changes the handle after
+// creating it
+unsafe impl Send for LtHandle {}
+// SAFETY: see `Send`
+unsafe impl Sync for LtHandle {}
+
+impl Drop for LtHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by `cublasLtCreate` and is destroyed once
+        let _ = unsafe { lt::destroy_handle(self.0) };
+    }
 }
 
 /// The shared cuDNN handle, bound to the thread that created it
@@ -94,6 +132,7 @@ pub struct LibraryVersions {
 #[derive(Debug, Default)]
 pub(crate) struct Libraries {
     blas: OnceLock<Result<Blas, Failure>>,
+    lt: OnceLock<Result<Lt, Failure>>,
     dnn: OnceLock<Result<Dnn, Failure>>,
     nvrtc: OnceLock<Result<SharedObject, Failure>>,
 }
@@ -115,6 +154,21 @@ impl Libraries {
                 Ok(Blas {
                     handle,
                     math: Mutex::new(Math::Fp32),
+                    _library: checked,
+                })
+            }))
+            .map(|_| ()),
+            Library::CublasLt => cached(self.lt.get_or_init(|| {
+                let checked = present(profile, library)?;
+                // cuBLASLt ties a new handle to the current context, as cuBLAS does
+                stream.context().bind_to_thread().map_err(Failure::Driver)?;
+                let handle = LtHandle(lt::create_handle().map_err(Failure::Lt)?);
+                let workspace = stream
+                    .alloc_zeros::<u8>(MATMUL_WORKSPACE_BYTES)
+                    .map_err(Failure::Driver)?;
+                Ok(Lt {
+                    handle,
+                    workspace,
                     _library: checked,
                 })
             }))
@@ -164,6 +218,11 @@ impl Libraries {
         cached(value).map(|blas| &blas.handle)
     }
 
+    /// The prepared cuBLASLt handle and workspace
+    pub(crate) fn lt(&self) -> Result<&Lt, Error> {
+        cached(self.lt.get().ok_or(unprepared(Library::CublasLt))?)
+    }
+
     /// The shared cuDNN handle, only on the thread that prepared it
     pub(crate) fn dnn(&self) -> Result<&Arc<Cudnn>, Error> {
         let dnn = cached(self.dnn.get().ok_or(unprepared(Library::Cudnn))?)?;
@@ -207,6 +266,8 @@ fn present(profile: &Profile, library: Library) -> Result<SharedObject, Failure>
     let extra = &profile.extra_symbols;
     let (name, base, extra) = match library {
         Library::Cublas => ("cublas", CUBLAS, extra.cublas),
+        // consumers reach cuBLASLt only through cudakit's plans
+        Library::CublasLt => ("cublasLt", CUBLASLT, &[][..]),
         Library::Cudnn => ("cudnn", CUDNN, extra.cudnn),
         Library::Nvrtc => ("nvrtc", NVRTC, extra.nvrtc),
         Library::Driver => ("cuda", &[][..], &[][..]),
@@ -251,7 +312,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{cached, preflight};
-    use crate::symbols::{CUBLAS, CUDNN, NVRTC};
+    use crate::symbols::{CUBLAS, CUBLASLT, CUDNN, NVRTC};
     use crate::{Error, Library};
 
     struct StubDirectory(PathBuf);
@@ -312,6 +373,7 @@ mod tests {
     fn every_required_symbol_is_checked_before_cudarc_can_run() {
         for (library, symbols) in [
             (Library::Cublas, CUBLAS),
+            (Library::CublasLt, CUBLASLT),
             (Library::Cudnn, CUDNN),
             (Library::Nvrtc, NVRTC),
         ] {

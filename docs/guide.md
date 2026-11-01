@@ -46,7 +46,7 @@ pub static PROFILE: Profile = Profile {
 };
 ```
 
-`LibraryPolicy::DriverOnly` refuses every cuBLAS, cuDNN and NVRTC request before
+`LibraryPolicy::DriverOnly` refuses every cuBLAS, cuBLASLt, cuDNN and NVRTC request before
 anything is looked up, even when another crate in the binary enabled the `libraries`
 feature.
 
@@ -150,6 +150,40 @@ Products are row-major. Each buffer must hold exactly its matrix, and cudakit ch
 lengths. In a batch, a stride of 0 on `a` or `b` reuses one operand for every item, and
 output strides must not overlap. `Math` is exhaustive, so you can persist it in tuning
 keys and match it.
+
+`Sgemm` runs whatever algorithm cuBLAS picks, which is cuBLASLt's first heuristic. On
+small products that choice often leaves most of a large GPU idle, and a split-K
+algorithm further down the heuristic's list can be twice as fast. A `MatmulPlan` fixes
+the algorithm instead:
+
+```rust
+use cudakit::{Library, Math, Matmul, Operands};
+
+runtime.prepare(Library::CublasLt)?;
+let spec = Matmul::linear(rows, outputs, inputs, Operands::F32(Math::Tf32));
+
+// once, offline: time each candidate and store the winner's `MatmulAlgo`, keyed on
+// the device and `runtime.cublaslt_version()?`
+let candidates = runtime.matmul_candidates(spec, 16)?;
+
+// at load: the stored algorithm, or the heuristic's first when there is none or
+// cuBLASLt rejects it
+let plan = match stored {
+    Some(algo) => runtime.matmul_plan_with(spec, algo).or_else(|_| runtime.matmul_plan(spec))?,
+    None => runtime.matmul_plan(spec)?,
+};
+runtime.matmul(&plan, 1.0, 0.0, &x, &w, &mut y)?;
+```
+
+`Operands::F16` takes `u16` buffers of FP16 bit patterns; `c` is FP32 either way. Every
+buffer must start on a `MATMUL_ALIGNMENT` (16-byte) boundary, which whole allocations
+do; cuBLASLt's algorithms assume it, so an offset view fails with `Error::Unsupported`
+where `Sgemm` would run. A
+fixed algorithm also fixes the summation order, so results stay the same from run to
+run, which timing at run time would not give. Plans hold host descriptors only, are
+`Send + Sync`, and may be recorded in a graph: every plan shares one workspace of
+`MATMUL_WORKSPACE_BYTES` that lives as long as the `Gpu`. cudakit keeps no tuning of
+its own; the timing loop and the tune file stay in your crate.
 
 ## 6. Graphs
 

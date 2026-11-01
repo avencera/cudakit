@@ -5,7 +5,7 @@ ASR). It started as the CUDA layer of speakrs 0.7.0.
 
 The property every change must keep: **a build needs no CUDA toolkit, and a process
 loads only the NVIDIA driver (`libcuda`) plus, when a consumer allows it, cuBLAS,
-cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
+cuBLASLt, cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
 the crate is not called `cuda-runtime`.
 
 ## Crate boundary
@@ -161,8 +161,8 @@ cudakit/
 | Feature | Adds |
 | --- | --- |
 | (none) | driver API only: `cudarc` with `driver`, `nvrtc` (for the `Ptx` type; NVRTC is not loaded), `dynamic-loading`, `cuda-12040` |
-| `libraries` | `cudarc/cublas`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `dnn` |
-| `serde` | serde for `DriverRelease` |
+| `libraries` | `cudarc/cublas`, `cudarc/cublaslt`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `MatmulPlan`, `dnn` |
+| `serde` | serde for `DriverRelease`, `Math`, `Operands`, `Matmul` and `MatmulAlgo` |
 | `test-support` | fixtures for consumers' host-only tests |
 
 Consumers make cudakit an optional dependency enabled only by their CUDA features, so CPU
@@ -179,7 +179,16 @@ and CoreML builds stay free of cudarc.
 - Tier helpers that encode one application's Cargo features or environment variables
   (choosing a tier from an env var, mapping tiers to feature names beyond the
   `Profile`) stay in that application.
-- Tune files stay in consumers; cudakit provides only the driver release they key on.
+- Tune files stay in consumers; cudakit provides only the driver release and library
+  versions they key on.
+- `MatmulPlan` fixes one cuBLASLt algorithm per product instead of choosing at run time
+  by timing. The algorithm decides the summation order, so a choice made by timing
+  would change results from one process to the next; a consumer that wants a faster
+  algorithm than the heuristic's first measures once and persists the `MatmulAlgo`,
+  which cuBLASLt documents as reusable with the same library version. One workspace
+  serves every plan because all products run in order on the GPU's stream, and a
+  graph captures its fixed address. Consumers reach cuBLASLt only through plans, so
+  `ExtraSymbols` has no cuBLASLt list and `Library::CublasLt` is an additive variant.
 - The cuBLAS handle is shared with cudakit's GEMMs, which pass host scalars in the math
   mode they lock, so raw access is `unsafe fn Gpu::blas(math)`: the caller must leave
   pointer mode, math mode, stream and workspace alone. cudarc's event-tracking pause

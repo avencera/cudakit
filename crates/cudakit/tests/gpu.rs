@@ -9,7 +9,8 @@ use cudakit::cudarc::driver::{LaunchConfig, PushKernelArg};
 use cudakit::dnn::{ConvPlanner, Residual};
 use cudakit::{
     AreaPtx, Conv2d, Error, ExtraSymbols, Gpu, KernelArea, Library, LibraryPolicy, LoadedArtifact,
-    Math, ModuleRequest, Options, Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
+    Math, Matmul, MatmulAlgo, ModuleRequest, Operands, Options, Profile, PtxTier, Runtime, Sgemm,
+    SgemmBatched, TierSet,
 };
 
 const BASE: Profile = Profile {
@@ -390,6 +391,134 @@ fn sgemm_matches_the_row_major_reference() -> Result<(), Error> {
     Ok(())
 }
 
+/// FP16 bits of `value`, which must be zero or a normal FP16 with at most 10
+/// mantissa bits, as the test values are
+fn f16_bits(value: f32) -> u16 {
+    if value == 0.0 {
+        return 0;
+    }
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    assert!(
+        (1..31).contains(&exponent) && bits & 0x1fff == 0,
+        "{value} is not an exact FP16"
+    );
+    sign | ((exponent as u16) << 10) | ((bits >> 13) & 0x3ff) as u16
+}
+
+#[test]
+fn every_matmul_candidate_matches_the_row_major_reference() -> Result<(), Error> {
+    let Some(runtime) = runtime() else {
+        return Ok(());
+    };
+    runtime.prepare(Library::CublasLt)?;
+    assert!(runtime.cublaslt_version()? > 0);
+    let stream = runtime.stream();
+
+    // large enough that the heuristic offers split-K and several tiles; the values are
+    // multiples of 1/8, exact in TF32 and FP16, so every precision matches FP32
+    let (m, n, k) = (48, 96, 256);
+    for (a_transposed, b_transposed) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let reference_spec = Sgemm {
+            a_transposed,
+            b_transposed,
+            ..Sgemm::new(m, n, k)
+        };
+        let (a, b) = (values(m * k, 5), values(k * n, 6));
+        let expected = reference(reference_spec, &a, &b);
+        let (a32, b32) = (stream.clone_htod(&a)?, stream.clone_htod(&b)?);
+        let to_f16 = |values: &[f32]| values.iter().copied().map(f16_bits).collect::<Vec<_>>();
+        let (a16, b16) = (
+            stream.clone_htod(&to_f16(&a))?,
+            stream.clone_htod(&to_f16(&b))?,
+        );
+
+        for operands in [
+            Operands::F32(Math::Fp32),
+            Operands::F32(Math::Tf32),
+            Operands::F16,
+        ] {
+            let spec = Matmul::new(m, n, k, operands).transposed(a_transposed, b_transposed);
+            let candidates = runtime.matmul_candidates(spec, 16)?;
+            assert!(!candidates.is_empty(), "no algorithm for {spec:?}");
+            assert_eq!(runtime.matmul_plan(spec)?.algo(), candidates[0].algo);
+            for candidate in candidates {
+                let config = runtime.matmul_algo_config(candidate.algo)?;
+                let plan = runtime.matmul_plan_with(spec, candidate.algo)?;
+                let mut c = stream.alloc_zeros::<f32>(m * n)?;
+                match operands {
+                    Operands::F16 => runtime.matmul(&plan, 1.0, 0.0, &a16, &b16, &mut c)?,
+                    _ => runtime.matmul(&plan, 1.0, 0.0, &a32, &b32, &mut c)?,
+                }
+                let actual = stream.clone_dtoh(&c)?;
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (actual - expected).abs() <= 1e-4 * expected.abs().max(1.0),
+                        "{spec:?} with {config}, element {index}: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_matmul_plan_accumulates_replays_in_a_graph_and_checks_its_inputs() -> Result<(), Error> {
+    let Some(runtime) = runtime() else {
+        return Ok(());
+    };
+    runtime.prepare(Library::CublasLt)?;
+    let stream = runtime.stream();
+    let spec = Matmul::linear(16, 64, 32, Operands::F32(Math::Fp32));
+    let (a, w) = (values(16 * 32, 7), values(64 * 32, 8));
+    let reference_spec = Sgemm {
+        b_transposed: true,
+        ..Sgemm::new(16, 64, 32)
+    };
+    let product = reference(reference_spec, &a, &w);
+    let (a_device, w_device) = (stream.clone_htod(&a)?, stream.clone_htod(&w)?);
+    let plan = runtime.matmul_plan(spec)?;
+
+    // `beta = 1` adds onto `c`, twice through a captured graph
+    let mut c = stream.clone_htod(&vec![1.0_f32; 16 * 64])?;
+    // SAFETY: the buffers outlive the graph's launches, which finish before the reads
+    let graph = unsafe {
+        runtime.capture_nonempty(|| runtime.matmul(&plan, 0.5, 1.0, &a_device, &w_device, &mut c))
+    }?;
+    graph.launch()?;
+    graph.launch()?;
+    let expected: Vec<f32> = product.iter().map(|value| 1.0 + value).collect();
+    assert_close(&stream.clone_dtoh(&c)?, &expected);
+
+    let short = stream.alloc_zeros::<f32>(3)?;
+    assert!(matches!(
+        runtime.matmul(&plan, 1.0, 0.0, &short, &w_device, &mut c),
+        Err(Error::BufferLength { .. })
+    ));
+    // FP16 buffers for an FP32 plan
+    let halves = stream.alloc_zeros::<u16>(16 * 32)?;
+    let weights = stream.alloc_zeros::<u16>(64 * 32)?;
+    assert!(matches!(
+        runtime.matmul(&plan, 1.0, 0.0, &halves, &weights, &mut c),
+        Err(Error::Unsupported { .. })
+    ));
+    // cuBLASLt's algorithms assume 16-byte alignment, so an offset view is refused
+    let offset = stream.alloc_zeros::<f32>(16 * 32 + 1)?;
+    assert!(matches!(
+        runtime.matmul(&plan, 1.0, 0.0, &offset.slice(1..), &w_device, &mut c),
+        Err(Error::Unsupported { .. })
+    ));
+    // a stale or corrupt tune entry is refused, not run
+    assert!(matches!(
+        runtime.matmul_plan_with(spec, MatmulAlgo([u64::MAX; 8])),
+        Err(Error::Unsupported { .. })
+    ));
+    Ok(())
+}
+
 #[test]
 fn batched_sgemm_matches_each_product() -> Result<(), Error> {
     let Some(runtime) = runtime() else {
@@ -543,7 +672,12 @@ fn driver_only_profile_refuses_libraries_before_loading_them() -> Result<(), Err
     let Some(gpu) = opened(|| Gpu::open(0, &DRIVER_ONLY, None)) else {
         return Ok(());
     };
-    for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
+    for library in [
+        Library::Cublas,
+        Library::CublasLt,
+        Library::Cudnn,
+        Library::Nvrtc,
+    ] {
         assert!(matches!(
             gpu.prepare(library),
             Err(Error::LibraryForbidden { library: refused }) if refused == library
@@ -557,6 +691,12 @@ fn driver_only_profile_refuses_libraries_before_loading_them() -> Result<(), Err
         gpu.sgemm(Sgemm::new(2, 2, 2), &a, &a, &mut c),
         Err(Error::LibraryForbidden {
             library: Library::Cublas
+        })
+    ));
+    assert!(matches!(
+        gpu.matmul_candidates(Matmul::new(2, 2, 2, Operands::F32(Math::Fp32)), 1),
+        Err(Error::LibraryForbidden {
+            library: Library::CublasLt
         })
     ));
     gpu.prepare(Library::Driver)

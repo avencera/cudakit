@@ -3,6 +3,8 @@ use std::fmt;
 #[cfg(feature = "libraries")]
 use cudarc::cublas::result::CublasError;
 #[cfg(feature = "libraries")]
+use cudarc::cublaslt::result::CublasError as LtError;
+#[cfg(feature = "libraries")]
 use cudarc::cudnn::CudnnError;
 use cudarc::driver::DriverError;
 
@@ -20,6 +22,8 @@ pub enum Library {
     Driver,
     /// cuBLAS
     Cublas,
+    /// cuBLASLt, cuBLAS's matmul library with explicit algorithm selection
+    CublasLt,
     /// cuDNN 9
     Cudnn,
     /// Runtime compilation, which cuDNN uses for some dynamic kernels
@@ -31,6 +35,7 @@ impl fmt::Display for Library {
         f.write_str(match self {
             Self::Driver => "CUDA driver (libcuda)",
             Self::Cublas => "cuBLAS",
+            Self::CublasLt => "cuBLASLt",
             Self::Cudnn => "cuDNN",
             Self::Nvrtc => "NVRTC",
         })
@@ -141,6 +146,10 @@ pub enum Error {
     #[cfg(feature = "libraries")]
     #[error("cuBLAS: {0}")]
     Cublas(#[from] CublasError),
+    /// cuBLASLt returned an error
+    #[cfg(feature = "libraries")]
+    #[error("cuBLASLt: {0}")]
+    CublasLt(#[from] LtError),
     /// cuDNN returned an error
     #[cfg(feature = "libraries")]
     #[error("cuDNN: {0}")]

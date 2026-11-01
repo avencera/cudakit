@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1
+
+### cudakit
+
+- `MatmulPlan`: row-major cuBLASLt products with FP32 (`Math::Fp32` or `Math::Tf32`)
+  or FP16 operands and one fixed algorithm. `Gpu::matmul_candidates` lists the
+  heuristic's algorithms best first, `Gpu::matmul_plan_with` checks a stored
+  `MatmulAlgo` before use, and `Gpu::cublaslt_version` keys tune files. Plans share
+  one workspace, `MATMUL_WORKSPACE_BYTES`, and can be recorded in graphs. Buffers must
+  start on `MATMUL_ALIGNMENT` (16-byte) boundaries; `Gpu::matmul_algo_config` reads an
+  algorithm's tile, stages and split-K back for logs
+- `Library::CublasLt` and `Error::CublasLt`, with the cuBLASLt symbol preflight
+- serde for `Math`, `Operands`, `Matmul` and `MatmulAlgo` under the `serde` feature
+
 ## 0.1.0
 
 First release.

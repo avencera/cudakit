@@ -192,6 +192,12 @@ impl Gpu {
         Ok(dnn)
     }
 
+    /// The library cells, for cudakit's own wrappers in other modules
+    #[cfg(feature = "libraries")]
+    pub(crate) fn libraries(&self) -> &Libraries {
+        &self.libraries
+    }
+
     /// Prepares cuBLAS and cuDNN and reports their versions
     #[cfg(feature = "libraries")]
     pub fn library_versions(&self) -> Result<LibraryVersions, Error> {

@@ -6,8 +6,8 @@
 
 **A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda` at run
 time and never links or loads the CUDA Runtime (`libcudart`). Building needs no CUDA
-toolkit, and running needs only the driver. cuBLAS and cuDNN are optional and also
-loaded at run time. Each one is loaded only when the application's policy allows it,
+toolkit, and running needs only the driver. cuBLAS, cuBLASLt and cuDNN are optional
+and also loaded at run time. Each one is loaded only when the application's policy allows it,
 and only after a symbol check passes.
 
 cudakit is the shared GPU layer of [speakrs](https://github.com/avencera/speakrs)
@@ -26,6 +26,9 @@ exact-architecture cubins.
   driver-only or library use), checked when the GPU opens
 - `DeviceTensor`: a shaped device buffer
 - `Sgemm` and `SgemmBatched`: row-major cuBLAS products with length checks
+- `MatmulPlan`: a row-major cuBLASLt product with FP32 or FP16 operands and a fixed
+  algorithm, which you can rank with `Gpu::matmul_candidates` and persist in a tune file;
+  its buffers start on 16-byte boundaries
 - `Gpu::capture`: CUDA graph capture that pauses cudarc's event tracking and ends the
   capture even when the enqueue fails
 - `dnn`: a deterministic cuDNN convolution planner with fused bias, residual and ReLU
@@ -60,8 +63,8 @@ whole setup: the profile, kernel areas, threads, graphs and the kernel toolchain
 | Feature | Adds |
 | --- | --- |
 | (none) | Driver API only |
-| `libraries` | cuBLAS and cuDNN through cudarc, the symbol preflight, the GEMMs and `dnn` |
-| `serde` | serde for `identity::DriverRelease` |
+| `libraries` | cuBLAS, cuBLASLt and cuDNN through cudarc, the symbol preflight, the GEMMs and `dnn` |
+| `serde` | serde for `identity::DriverRelease`, `Math`, `Operands`, `Matmul` and `MatmulAlgo` |
 | `test-support` | Fixtures for host-only tests |
 
 Even with `libraries` enabled, a driver-only `Profile` refuses every library before
@@ -75,7 +78,7 @@ builds free of cudarc.
 
 - Linux with an NVIDIA driver for CUDA 12.4 or newer. Other platforms are untested
 - A GPU of compute capability 7.5 (Turing) or newer
-- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested with CUDA 13 and
+- For the `libraries` feature only: cuBLAS, cuBLASLt and cuDNN 9 (tested with CUDA 13 and
   cuDNN 9.27)
 
 ## Kernel toolchain

@@ -3,7 +3,7 @@
 //! cudakit loads the NVIDIA driver (`libcuda`) at run time through cudarc and never
 //! loads the CUDA Runtime (`libcudart`), so a build needs no CUDA toolkit and a
 //! process needs only the driver. With the `libraries` feature, and only when the
-//! consumer's [`Profile`] allows it, cuBLAS, cuDNN and NVRTC are loaded lazily after a
+//! consumer's [`Profile`] allows it, cuBLAS, cuBLASLt, cuDNN and NVRTC are loaded lazily after a
 //! symbol preflight.
 //!
 //! - [`Gpu`] owns one context and one stream, the device attributes and the optional
@@ -12,6 +12,8 @@
 //!   exact-architecture cubins, loaded by exact identity ([`ModuleRequest`])
 //! - [`DeviceTensor`] is a shaped device buffer
 //! - [`Sgemm`] and [`SgemmBatched`] describe row-major cuBLAS products
+//! - [`MatmulPlan`] runs a row-major cuBLASLt product with a fixed, persistable
+//!   algorithm, FP32 or FP16 operands (feature `libraries`)
 //! - [`Gpu::capture`] records stream work as a replayable [`Graph`]
 //! - `dnn` plans cuDNN convolutions (feature `libraries`)
 //! - [`identity`] reads the driver release for persisted tuning identities
@@ -33,6 +35,8 @@ mod graph;
 pub mod identity;
 #[cfg(feature = "libraries")]
 mod libraries;
+#[cfg(feature = "libraries")]
+mod matmul;
 mod profile;
 mod runtime;
 pub mod symbols;
@@ -52,7 +56,12 @@ pub use gemm::{Math, Sgemm, SgemmBatched};
 pub use gpu::Gpu;
 pub use graph::Graph;
 #[cfg(feature = "libraries")]
-pub use libraries::{BlasGuard, LibraryVersions};
+pub use libraries::{BlasGuard, LibraryVersions, MATMUL_WORKSPACE_BYTES};
+#[cfg(feature = "libraries")]
+pub use matmul::{
+    AlgoConfig, MATMUL_ALIGNMENT, Matmul, MatmulAlgo, MatmulCandidate, MatmulElement, MatmulPlan,
+    Operands,
+};
 pub use profile::{ExtraSymbols, LibraryPolicy, Profile};
 pub use runtime::{LoadedKernels, Options, Runtime};
 pub use tensor::{DeviceTensor, unfold_windows};

@@ -20,6 +20,26 @@ pub const CUBLAS: &[&CStr] = &[
     c"cublasGetCudartVersion",
 ];
 
+/// cuBLASLt symbols reached by [`MatmulPlan`](crate::MatmulPlan) and its algorithm
+/// queries
+pub const CUBLASLT: &[&CStr] = &[
+    c"cublasLtCreate",
+    c"cublasLtDestroy",
+    c"cublasLtGetVersion",
+    c"cublasLtMatmul",
+    c"cublasLtMatmulAlgoCheck",
+    c"cublasLtMatmulAlgoConfigGetAttribute",
+    c"cublasLtMatmulAlgoGetHeuristic",
+    c"cublasLtMatmulDescCreate",
+    c"cublasLtMatmulDescDestroy",
+    c"cublasLtMatmulDescSetAttribute",
+    c"cublasLtMatmulPreferenceCreate",
+    c"cublasLtMatmulPreferenceDestroy",
+    c"cublasLtMatmulPreferenceSetAttribute",
+    c"cublasLtMatrixLayoutCreate",
+    c"cublasLtMatrixLayoutDestroy",
+];
+
 /// cuDNN symbols reached by the handle, the convolution planner and version queries
 pub const CUDNN: &[&CStr] = &[
     c"cudnnCreate",
