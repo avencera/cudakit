@@ -101,6 +101,20 @@ impl SearchOrder {
                 }
             })
     }
+
+    /// A copy of `name` in any untrusted directory, even behind a trusted one
+    ///
+    /// Windows may pass over a trusted copy that fails to load, such as one built for
+    /// another architecture, and go on to a later directory, so a copy anywhere in the
+    /// untrusted directories is refused
+    pub(crate) fn untrusted_copy(&self, name: &OsStr) -> Option<Untrusted> {
+        self.0
+            .iter()
+            .filter(|(_, trusted)| !trusted)
+            .map(|(dir, _)| dir.join(name))
+            .find(|file| file.is_file())
+            .map(Untrusted)
+    }
 }
 
 /// Paths that name the same directory, compared after resolving case and links
@@ -130,6 +144,10 @@ pub(crate) fn open_first(
         // came from, so cudarc gets that one
         if let Ok(loaded) = Library::open_already_loaded(name) {
             return Ok(Some(loaded.into()));
+        }
+
+        if let Some(untrusted) = order.untrusted_copy(name) {
+            return Err(untrusted);
         }
 
         let Some(found) = order.locate(name) else {
@@ -222,6 +240,12 @@ mod tests {
             locate("beside-exe.dll"),
             Some(Ok(exe.join("beside-exe.dll")))
         );
+        // a trusted copy that fails to load could leave Windows to reach the untrusted one
+        assert_eq!(
+            order.untrusted_copy("beside-exe.dll".as_ref()),
+            Some(Untrusted(cwd.join("beside-exe.dll")))
+        );
+        assert_eq!(order.untrusted_copy("absolute.dll".as_ref()), None);
         assert_eq!(locate("missing.dll"), None);
 
         // a current directory that is also an absolute PATH entry is searched as one

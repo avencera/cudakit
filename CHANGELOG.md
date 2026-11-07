@@ -15,7 +15,8 @@ yet.
 - On Windows, the driver, cuBLAS, cuDNN and NVRTC are never loaded from the current
   directory or a relative `PATH` entry. cudakit loads the file Windows' default search
   would pick by full path before cudarc opens it, and returns the new
-  `Error::UntrustedLibrary` when that file is in one of those directories. cuBLAS then
+  `Error::UntrustedLibrary` when a copy of a name it tries is in one of those
+  directories. cuBLAS then
   binds the cuBLASLt beside it, unless one of that name is already loaded
 - `Error::LibraryUnavailable` names the files cudakit looks for and where: `PATH` and
   `%CUDA_PATH_V12_x%\bin` on Windows, `LD_LIBRARY_PATH` and the ldconfig cache on

@@ -98,12 +98,13 @@ work but not cuBLAS or NVRTC. When a library is missing, the error names the fil
 Windows' default DLL search looks in the current directory before `PATH`, so a DLL
 planted in the folder a program runs from would load. Before cudarc opens the driver,
 cuBLAS, cuDNN or NVRTC, cudakit finds the file that search would pick and loads it by
-full path, or fails with `Error::UntrustedLibrary` when the file is in the current
-directory or a relative `PATH` entry (unless that is also the executable's directory, a
-Windows directory or an absolute `PATH` entry). cuBLAS's own import of cuBLASLt then
-comes from its directory, unless a cuBLASLt of that name is already loaded. cuDNN loads its sub-libraries itself, which cudakit doesn't
-control, and `cudarc::cublaslt` calls a consumer makes directly load cuBLASLt through
-cudarc's search, so still run programs from directories you trust.
+full path. It fails with `Error::UntrustedLibrary` instead when a copy of a name it
+tries is anywhere in the current directory or a relative `PATH` entry, unless that
+directory is also the executable's directory, a Windows directory or an absolute `PATH`
+entry. cuBLAS's own import of cuBLASLt then comes from its directory, unless a cuBLASLt
+of that name is already loaded. cuDNN loads its sub-libraries itself, which cudakit
+doesn't control, and `cudarc::cublaslt` calls a consumer makes directly load cuBLASLt
+through cudarc's search, so still run programs from directories you trust.
 
 `identity::DriverIdentity::read` opens `nvml.dll` from System32 only; Windows has no
 sysfs or procfs fallback.
