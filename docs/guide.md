@@ -13,7 +13,7 @@ cuda = ["dep:cudakit", "cudakit/libraries"]         # library-first build
 cuda-sm75 = ["dep:cudakit", "dep:myapp-ptx-sm75"]   # one per tier you ship
 
 [dependencies]
-cudakit = { version = "0.1", optional = true }
+cudakit = { version = "0.2", optional = true }
 ```
 
 Enable cudakit only from your CUDA features, so CPU builds never compile cudarc.
@@ -51,8 +51,8 @@ anything is looked up, even when another crate in the binary enabled the `librar
 feature.
 
 If you call cuBLAS or cuDNN entry points directly, beyond cudakit's wrappers, list them
-in `extra_symbols`. The preflight then rejects a library that lacks them before cudarc
-loads it. `unsafe fn Gpu::blas(math)` hands out the shared cuBLAS handle under its mode
+in `extra_symbols`. Once cudarc opens a library, the preflight checks its handle and
+rejects a library that lacks them before any call into it. `unsafe fn Gpu::blas(math)` hands out the shared cuBLAS handle under its mode
 lock; leave its pointer mode, math mode, stream and workspace as they are.
 
 ## 3. Kernel areas

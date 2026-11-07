@@ -1,26 +1,29 @@
 # Changelog
 
-## 0.1.1
+## 0.2.0
 
 Windows x86_64 support. CI builds and tests it, but nothing has run on a Windows GPU
 yet.
 
 ### cudakit
 
-- Windows x86_64 with the MSVC toolchain. The driver is `nvcuda.dll`, and the
-  `libraries` feature opens the names cudarc looks for: CUDA 12's `cublas64_12.dll`
-  and `nvrtc64_120_0.dll`, and cuDNN 9's `cudnn64_9.dll`. CUDA 13's `cublas64_13.dll`
-  and `nvrtc64_130_0.dll` are not among them, so cuBLAS and NVRTC need CUDA 12's
-  libraries on Windows
-- On Windows, the driver, cuBLAS, cuDNN and NVRTC are never loaded from the current
-  directory or a relative `PATH` entry. cudakit loads the file Windows' default search
-  would pick by full path before cudarc opens it, and returns the new
-  `Error::UntrustedLibrary` when a copy of a name it tries is in one of those
-  directories. cuBLAS then
-  binds the cuBLASLt beside it, unless one of that name is already loaded
+- cudakit now depends on [`cudakit-cudarc`](https://crates.io/crates/cudakit-cudarc)
+  0.19.10, a cudarc fork with library-loading fixes, in place of `cudarc`. Its library
+  is still `cudarc`, re-exported as `cudakit::cudarc`. Consumers that also depend on
+  upstream `cudarc` directly should use `cudakit::cudarc` instead
+- On Linux, versioned sonames such as `libcublas.so.13` and `libcublas.so.12` open
+  before a toolkit's unversioned `libcublas.so`, so a process no longer loads two
+  copies of cuBLAS or pairs a cuBLAS with another install's cuBLASLt
+- Windows x86_64 with the MSVC toolchain. The driver is `nvcuda.dll` from System32.
+  The `libraries` feature opens CUDA 12's or CUDA 13's cuBLAS and NVRTC
+  (`cublas64_12.dll`, `cublas64_13.dll`, `nvrtc64_120_0.dll`, `nvrtc64_130_0.dll`) and
+  cuDNN 9's `cudnn64_9.dll` from absolute `PATH` entries, `%CUDA_PATH%\bin\x64` and
+  `%CUDA_PATH%\bin`, never from the current directory or a relative `PATH` entry
+- The symbol preflight checks the library handle cudarc itself opened, instead of
+  repeating cudarc's search
 - `Error::LibraryUnavailable` names the files cudakit looks for and where: `PATH` and
-  `%CUDA_PATH_V12_x%\bin` on Windows, `LD_LIBRARY_PATH` and the ldconfig cache on
-  Linux. On Windows the driver displays as `CUDA driver (nvcuda.dll)`
+  `%CUDA_PATH%` on Windows, `LD_LIBRARY_PATH` and the ldconfig cache on Linux. On
+  Windows the driver displays as `CUDA driver (nvcuda.dll)`
 - `identity::DriverIdentity::read` opens `nvml.dll` from System32 on Windows. It used
   to look for NVML only under its Linux name and then read `\sys\...` and `\proc\...`
   on the current drive. It now reads sysfs and procfs only on Linux

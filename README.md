@@ -9,7 +9,7 @@
 (`libcudart`). Building needs no CUDA
 toolkit, and running needs only the driver. cuBLAS and cuDNN are optional and also
 loaded at run time. Each one is loaded only when the application's policy allows it,
-and only after a symbol check passes.
+and used only after a symbol check of the loaded library passes.
 
 cudakit is the shared GPU layer of [speakrs](https://github.com/avencera/speakrs)
 (speaker diarization) and [scriptrs](https://github.com/avencera/scriptrs) (speech
@@ -39,7 +39,7 @@ whichever thread calls it.
 
 ```toml
 [dependencies]
-cudakit = { version = "0.1", features = ["libraries"] }
+cudakit = { version = "0.2", features = ["libraries"] }
 ```
 
 ```rust
@@ -85,29 +85,33 @@ builds free of cudarc.
 Windows x86_64 builds with the MSVC toolchain, and CI runs clippy and the unit tests
 there, but nothing has run on a Windows GPU yet.
 
-The driver is `nvcuda.dll`, which the NVIDIA driver installs. With the `libraries`
-feature, cudakit loads the names cudarc looks for, which on Windows are CUDA 10 to 12
-names: it needs CUDA 12's `cublas64_12.dll` (with `cublasLt64_12.dll` beside it) and
-`nvrtc64_120_0.dll`, and cuDNN 9's `cudnn64_9.dll`. Put the directory holding them on
-`PATH` as an absolute path; a CUDA 12 toolkit keeps its DLLs in
-`%CUDA_PATH_V12_x%\bin`. cudarc doesn't look for CUDA 13's `cublas64_13.dll` or `nvrtc64_130_0.dll` (in
-`%CUDA_PATH%\bin\x64`), so a machine with only CUDA 13's libraries can run driver-only
-work but not cuBLAS or NVRTC. When a library is missing, the error names the files and
-`PATH`.
+The driver is `nvcuda.dll`, which the NVIDIA driver installs, and it loads only from
+System32. With the `libraries` feature, cudakit opens CUDA 12's or CUDA 13's cuBLAS
+(`cublas64_12.dll` or `cublas64_13.dll`, with the matching cuBLASLt beside it) and NVRTC
+(`nvrtc64_120_0.dll` or `nvrtc64_130_0.dll`), and cuDNN 9's `cudnn64_9.dll`. It looks in
+each absolute `PATH` entry, then `%CUDA_PATH%\bin\x64` (where CUDA 13 keeps its DLLs) and
+`%CUDA_PATH%\bin` (CUDA 12). When a library is missing, the error names the files and
+where it looked.
 
 Windows' default DLL search looks in the current directory before `PATH`, so a DLL
-planted in the folder a program runs from would load. Before cudarc opens the driver,
-cuBLAS, cuDNN or NVRTC, cudakit finds the file that search would pick and loads it by
-full path. It fails with `Error::UntrustedLibrary` instead when a copy of a name it
-tries is anywhere in the current directory or a relative `PATH` entry, unless that
-directory is also the executable's directory, a Windows directory or an absolute `PATH`
-entry. cuBLAS's own import of cuBLASLt then comes from its directory, unless a cuBLASLt
-of that name is already loaded. cuDNN loads its sub-libraries itself, which cudakit
-doesn't control, and `cudarc::cublaslt` calls a consumer makes directly load cuBLASLt
-through cudarc's search, so still run programs from directories you trust.
+planted in the folder a program runs from would load. cudakit's loading comes from
+[`cudakit-cudarc`](https://crates.io/crates/cudakit-cudarc), a cudarc fork that never
+loads from the current directory or a relative `PATH` entry, and loads each DLL by full
+path so its imports come from its own directory. cuDNN loads its own sub-libraries,
+which neither controls, so still run programs from directories you trust.
 
 `identity::DriverIdentity::read` opens `nvml.dll` from System32 only; Windows has no
 sysfs or procfs fallback.
+
+### cudarc
+
+cudakit depends on `cudakit-cudarc`, a fork of cudarc 0.19.10 whose library is still
+named `cudarc`, and re-exports it as `cudakit::cudarc`. Besides the Windows rules above,
+it opens versioned Linux sonames (`libcublas.so.13`, `libcublas.so.12`) before a
+toolkit's unversioned `libcublas.so`, so a process never holds two copies of cuBLAS or
+pairs one install's cuBLAS with another's cuBLASLt. Reach cudarc through
+`cudakit::cudarc` rather than depending on upstream `cudarc` too: two copies of cudarc
+in one binary would each open their own libraries.
 
 ## Kernel toolchain
 

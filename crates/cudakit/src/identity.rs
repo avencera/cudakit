@@ -104,14 +104,36 @@ fn open_nvml() -> Option<Library> {
     unsafe { Library::new("libnvidia-ml.so.1") }.ok()
 }
 
-/// The driver installs `nvml.dll` in System32, so only System32 is searched, never the
-/// current directory
+/// The driver installs `nvml.dll` in System32, so it loads from there by full path
+///
+/// A bare name would reuse an `nvml.dll` the process already loaded from another
+/// directory, even with `LOAD_LIBRARY_SEARCH_SYSTEM32`, and the current directory is
+/// never searched
 #[cfg(windows)]
 fn open_nvml() -> Option<Library> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+
     use libloading::os::windows::{LOAD_LIBRARY_SEARCH_SYSTEM32, Library as WindowsLibrary};
 
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    // the system directory is never longer than MAX_PATH; read it from Windows rather
+    // than from `SystemRoot`, which the environment can change
+    let mut buffer = [0u16; 260];
+    // safety: the buffer is writable for the length passed
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|len| (1..buffer.len()).contains(len))?;
+    let file = PathBuf::from(OsString::from_wide(&buffer[..len])).join("nvml.dll");
+
     // safety: NVML library initializers have no caller preconditions
-    unsafe { WindowsLibrary::load_with_flags("nvml.dll", LOAD_LIBRARY_SEARCH_SYSTEM32) }
+    unsafe { WindowsLibrary::load_with_flags(&file, LOAD_LIBRARY_SEARCH_SYSTEM32) }
         .ok()
         .map(Library::from)
 }

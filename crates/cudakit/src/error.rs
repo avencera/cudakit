@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::PathBuf;
 
 #[cfg(feature = "libraries")]
 use cudarc::cublas::result::CublasError;
@@ -43,29 +42,28 @@ impl fmt::Display for Library {
 impl Library {
     /// The files cudarc opens for this library on Windows, and where they are found
     ///
-    /// cudarc's candidates include CUDA 10, 11 and 12 names but no CUDA 13 one, so the
-    /// hints name the CUDA 12 files cudakit's symbols come from, and CUDA 13's as
-    /// unsupported rather than left for the user to discover
+    /// Besides System32 for the driver, cudarc looks only in absolute `PATH` entries and
+    /// under `%CUDA_PATH%`, never in the current directory
     #[cfg(windows)]
     fn search_hint(self) -> &'static str {
         match self {
             Self::Driver => {
-                "nvcuda.dll comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
+                "nvcuda.dll comes with the NVIDIA driver and loads only from System32; install \
+                 a driver for CUDA 12.4 or newer"
             }
             Self::Cublas => {
-                "cudakit needs CUDA 12's cublas64_12.dll, which loads cublasLt64_12.dll beside \
-                 it; put the directory holding them on PATH as an absolute path (a CUDA 12 \
-                 toolkit keeps them in %CUDA_PATH_V12_x%\\bin). CUDA 13's cublas64_13.dll, in \
-                 %CUDA_PATH%\\bin\\x64, is not supported yet"
+                "cudakit opens CUDA 12's cublas64_12.dll or CUDA 13's cublas64_13.dll, with the \
+                 matching cublasLt beside it, from an absolute PATH entry, %CUDA_PATH%\\bin\\x64 \
+                 (CUDA 13) or %CUDA_PATH%\\bin (CUDA 12)"
             }
             Self::Cudnn => {
-                "cudakit needs cuDNN 9's cudnn64_9.dll; put the directory holding it on PATH as an \
-                 absolute path"
+                "cudakit opens cuDNN 9's cudnn64_9.dll from an absolute PATH entry or under \
+                 %CUDA_PATH%\\bin"
             }
             Self::Nvrtc => {
-                "cudakit needs CUDA 12's nvrtc64_120_0.dll; put the directory holding it on PATH \
-                 as an absolute path (a CUDA 12 toolkit keeps it in %CUDA_PATH_V12_x%\\bin). \
-                 CUDA 13's nvrtc64_130_0.dll, in %CUDA_PATH%\\bin\\x64, is not supported yet"
+                "cudakit opens CUDA 12's nvrtc64_120_0.dll or CUDA 13's nvrtc64_130_0.dll from \
+                 an absolute PATH entry, %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin \
+                 (CUDA 12)"
             }
         }
     }
@@ -78,16 +76,15 @@ impl Library {
                 "libcuda.so.1 comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
             }
             Self::Cublas => {
-                "cudakit opens a toolkit's libcublas.so, or else libcublas.so.12, through \
-                 LD_LIBRARY_PATH or the ldconfig cache"
-            }
-            Self::Cudnn => {
-                "cudakit opens libcudnn.so, or else libcudnn.so.9, through LD_LIBRARY_PATH or \
+                "cudakit opens libcublas.so.12 or libcublas.so.13 through LD_LIBRARY_PATH or \
                  the ldconfig cache"
             }
+            Self::Cudnn => {
+                "cudakit opens libcudnn.so.9 through LD_LIBRARY_PATH or the ldconfig cache"
+            }
             Self::Nvrtc => {
-                "cudakit opens a toolkit's libnvrtc.so, or else libnvrtc.so.12, through \
-                 LD_LIBRARY_PATH or the ldconfig cache"
+                "cudakit opens libnvrtc.so.12 or libnvrtc.so.13 through LD_LIBRARY_PATH or the \
+                 ldconfig cache"
             }
         }
     }
@@ -107,20 +104,6 @@ pub enum Error {
     LibraryUnavailable {
         /// The library that failed to load
         library: Library,
-    },
-    /// Windows would load a CUDA library from the current directory or a relative `PATH`
-    /// entry, where a planted DLL would run its code (Windows only)
-    #[error(
-        "refusing to load the {library} shared library from {}, which Windows reaches through \
-         the current directory or a relative PATH entry; put it in the executable's directory \
-         or an absolute PATH entry, or run from another directory",
-        path.display()
-    )]
-    UntrustedLibrary {
-        /// The library that was refused
-        library: Library,
-        /// The file Windows would have loaded
-        path: PathBuf,
     },
     /// The consumer's driver-only policy forbids an optional library
     #[error("driver-only CUDA prohibits a direct request for {library}")]

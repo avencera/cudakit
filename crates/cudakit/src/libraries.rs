@@ -1,9 +1,7 @@
 //! Per-GPU fallible library cells, requested only while a consumer builds a plan
 
-use std::ffi::{CStr, OsStr};
+use std::ffi::CStr;
 use std::ops::Deref;
-#[cfg(windows)]
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::{self, ThreadId};
 
@@ -22,8 +20,6 @@ enum Failure {
     Missing(Library),
     Blas(CublasError),
     Dnn(CudnnError),
-    #[cfg(windows)]
-    Untrusted(Library, PathBuf),
 }
 
 impl From<Failure> for Error {
@@ -32,8 +28,6 @@ impl From<Failure> for Error {
             Failure::Missing(library) => Self::LibraryUnavailable { library },
             Failure::Blas(error) => Self::Cublas(error),
             Failure::Dnn(error) => Self::Cudnn(error),
-            #[cfg(windows)]
-            Failure::Untrusted(library, path) => Self::UntrustedLibrary { library, path },
         }
     }
 }
@@ -43,8 +37,6 @@ struct Blas {
     handle: CudaBlas,
     // keep mode selection and enqueue in one critical section
     math: Mutex<Math>,
-    // drop the handle before releasing the checked shared object
-    _library: SharedObject,
 }
 
 /// The shared cuDNN handle, bound to the thread that created it
@@ -56,7 +48,6 @@ struct Blas {
 struct Dnn {
     owner: ThreadId,
     handle: Arc<Cudnn>,
-    _library: SharedObject,
 }
 
 // SAFETY: other threads never reach `handle` except to drop it: `Libraries::dnn`
@@ -101,7 +92,7 @@ pub struct LibraryVersions {
 pub(crate) struct Libraries {
     blas: OnceLock<Result<Blas, Failure>>,
     dnn: OnceLock<Result<Dnn, Failure>>,
-    nvrtc: OnceLock<Result<SharedObject, Failure>>,
+    nvrtc: OnceLock<Result<(), Failure>>,
 }
 
 impl Libraries {
@@ -115,23 +106,21 @@ impl Libraries {
         profile.allow(library)?;
         match library {
             Library::Cublas => cached(self.blas.get_or_init(|| {
-                let checked = present(profile, library)?;
+                present(profile, library)?;
                 let handle = CudaBlas::new(stream.clone()).map_err(Failure::Blas)?;
                 set_math(&handle, Math::Fp32).map_err(Failure::Blas)?;
                 Ok(Blas {
                     handle,
                     math: Mutex::new(Math::Fp32),
-                    _library: checked,
                 })
             }))
             .map(|_| ()),
             Library::Cudnn => cached(self.dnn.get_or_init(|| {
-                let checked = present(profile, library)?;
+                present(profile, library)?;
                 let handle = Cudnn::new(stream.clone()).map_err(Failure::Dnn)?;
                 Ok(Dnn {
                     owner: thread::current().id(),
                     handle,
-                    _library: checked,
                 })
             }))
             .map(|_| ()),
@@ -209,36 +198,44 @@ fn set_math(blas: &CudaBlas, math: Math) -> Result<(), CublasError> {
     unsafe { cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), math.cublas()) }.result()
 }
 
-fn present(profile: &Profile, library: Library) -> Result<SharedObject, Failure> {
+fn present(profile: &Profile, library: Library) -> Result<(), Failure> {
     let extra = &profile.extra_symbols;
-    let (name, base, extra) = match library {
-        Library::Cublas => ("cublas", CUBLAS, extra.cublas),
-        Library::Cudnn => ("cudnn", CUDNN, extra.cudnn),
-        Library::Nvrtc => ("nvrtc", NVRTC, extra.nvrtc),
-        Library::Driver => ("cuda", &[][..], &[][..]),
+    let (base, extra) = match library {
+        Library::Cublas => (CUBLAS, extra.cublas),
+        Library::Cudnn => (CUDNN, extra.cudnn),
+        Library::Nvrtc => (NVRTC, extra.nvrtc),
+        Library::Driver => (&[][..], &[][..]),
     };
-    // the candidates must be cudarc's own, in its order, since cudarc opens the first
-    // one that loads and the preflight must check that same file. That is also why the
-    // list can't grow here: on Windows, cudarc tries CUDA 10 to 12 names such as
-    // cublas64_12.dll and nvrtc64_120_0.dll, and cuDNN 9's cudnn64_9.dll, but not CUDA
-    // 13's cublas64_13.dll or nvrtc64_130_0.dll. A CUDA 13 name that passed the
-    // preflight would leave cudarc to panic, or to open a different file than the one
-    // checked
-    preflight(
-        library,
-        cudarc::get_lib_name_candidates(name),
-        base.iter().chain(extra),
-    )
+    preflight(library, opened(library), base.iter().chain(extra)).map(|_| ())
 }
 
-fn preflight<'a>(
+/// The file cudarc opened for `library`, which it keeps for the process and every later
+/// call uses, so the preflight checks exactly what cudarc runs
+fn opened(library: Library) -> Option<&'static SharedObject> {
+    use cudarc::{cublas, cudnn, driver, nvrtc};
+
+    // SAFETY: CUDA library initializers have no caller preconditions, and `culib` only
+    // returns the handle `is_culib_present` just opened
+    unsafe {
+        match library {
+            Library::Cublas => cublas::sys::is_culib_present().then(|| cublas::sys::culib()),
+            Library::Cudnn => cudnn::sys::is_culib_present().then(|| cudnn::sys::culib()),
+            Library::Nvrtc => nvrtc::sys::is_culib_present().then(|| nvrtc::sys::culib()),
+            Library::Driver => driver::sys::is_culib_present().then(|| driver::sys::culib()),
+        }
+    }
+}
+
+/// Fails unless `opened` has every symbol
+///
+/// cudarc keeps the first file that opens, so a missing symbol in that file must fail
+/// here rather than be found later as a panic in a cudarc call
+fn preflight<'l, 'a>(
     library: Library,
-    choices: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    opened: Option<&'l SharedObject>,
     symbols: impl IntoIterator<Item = &'a &'a CStr>,
-) -> Result<SharedObject, Failure> {
-    let checked = open_first(library, choices)?;
-    // cudarc selects the first file that opens in this exact order; a missing symbol in
-    // that file must fail, not fall through to a different version
+) -> Result<&'l SharedObject, Failure> {
+    let checked = opened.ok_or(Failure::Missing(library))?;
     for symbol in symbols {
         // SAFETY: lookup only; the untyped address is never dereferenced or called
         unsafe { checked.get::<*const ()>(symbol.to_bytes_with_nul()) }
@@ -248,41 +245,24 @@ fn preflight<'a>(
     Ok(checked)
 }
 
-/// The first choice that opens, the way cudarc opens it
-#[cfg(not(windows))]
-fn open_first(
-    library: Library,
-    choices: impl IntoIterator<Item = impl AsRef<OsStr>>,
-) -> Result<SharedObject, Failure> {
-    choices
-        .into_iter()
-        // SAFETY: CUDA library initializers have no caller preconditions
-        .find_map(|choice| unsafe { SharedObject::new(choice.as_ref()) }.ok())
-        .ok_or(Failure::Missing(library))
-}
-
-/// The file cudarc's search would open, refused when it comes from an untrusted
-/// directory; see `dll_search`
-#[cfg(windows)]
-fn open_first(
-    library: Library,
-    choices: impl IntoIterator<Item = impl AsRef<OsStr>>,
-) -> Result<SharedObject, Failure> {
-    crate::dll_search::open_first(choices)
-        .map_err(|untrusted| Failure::Untrusted(library, untrusted.0))?
-        .ok_or(Failure::Missing(library))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use libloading::Library as SharedObject;
 
     use super::preflight;
     use crate::{Error, Library};
 
+    /// Stub libraries compiled with `cc`, which Unix runners have and Windows ones lack;
+    /// Windows tests use system DLLs instead
+    #[cfg(unix)]
     struct StubDirectory(PathBuf);
 
+    #[cfg(unix)]
     impl StubDirectory {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -295,15 +275,13 @@ mod tests {
             Self(path)
         }
 
-        /// Compiles a stub library with `cc`, which Unix runners have and Windows ones
-        /// lack; Windows tests use system DLLs instead
-        #[cfg(unix)]
+        /// Compiles and opens a stub library
         fn build(
             &self,
             index: usize,
             symbols: &[&std::ffi::CStr],
             omitted: Option<&std::ffi::CStr>,
-        ) -> PathBuf {
+        ) -> SharedObject {
             use std::process::Command;
 
             let source = self.0.join(format!("stub-{index}.c"));
@@ -328,10 +306,13 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&result.stderr)
             );
-            output
+
+            // SAFETY: the stub has no initializers
+            unsafe { SharedObject::new(&output) }.unwrap()
         }
     }
 
+    #[cfg(unix)]
     impl Drop for StubDirectory {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
@@ -357,14 +338,10 @@ mod tests {
         ] {
             let directory = StubDirectory::new();
             let complete = directory.build(0, symbols, None);
-            let checked = preflight(library, [&complete], symbols).unwrap();
-            // keep the checked object open after its name disappears
-            std::fs::remove_file(&complete).unwrap();
-            // SAFETY: the symbol is looked up, never called as a stub CUDA API
-            assert!(unsafe { checked.get::<*const ()>(symbols[0].to_bytes_with_nul()) }.is_ok());
+            assert!(preflight(library, Some(&complete), symbols).is_ok());
             for (index, omitted) in symbols.iter().enumerate() {
                 let incomplete = directory.build(index + 1, symbols, Some(omitted));
-                let error = preflight(library, [&incomplete], symbols).unwrap_err();
+                let error = preflight(library, Some(&incomplete), symbols).unwrap_err();
                 unavailable(error.into(), library);
             }
         }
@@ -372,71 +349,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn incomplete_first_library_does_not_fall_through_and_failure_is_cached() {
+    fn an_incomplete_library_fails_once_and_the_failure_is_cached() {
         use std::sync::OnceLock;
 
         use super::cached;
-        use crate::symbols::{CUBLAS, NVRTC};
+        use crate::symbols::CUBLAS;
 
         let directory = StubDirectory::new();
         let incomplete = directory.build(0, CUBLAS, Some(CUBLAS[0]));
-        let complete = directory.build(1, CUBLAS, None);
         let cell = OnceLock::new();
         let mut initializations = 0;
         for _ in 0..2 {
             let result = cell.get_or_init(|| {
                 initializations += 1;
-                preflight(Library::Cublas, [&incomplete, &complete], CUBLAS)
+                preflight(Library::Cublas, Some(&incomplete), CUBLAS).map(|_| ())
             });
             unavailable(cached(result).unwrap_err(), Library::Cublas);
         }
 
         assert_eq!(initializations, 1);
-        assert!(preflight(Library::Cublas, [&complete], CUBLAS).is_ok());
-        let missing = directory.0.join("not-installed");
-        unavailable(
-            preflight(Library::Nvrtc, [&missing], NVRTC)
-                .unwrap_err()
-                .into(),
-            Library::Nvrtc,
-        );
     }
 
-    /// Windows opens a bare name through its DLL search, as cudarc does, so system DLLs
-    /// stand in for the stubs: kernel32 opens first and lacks advapi32's
-    /// `CryptAcquireContextW`, so the preflight fails rather than falling through
+    /// System DLLs stand in for the stubs on Windows: kernel32 lacks advapi32's
+    /// `CryptAcquireContextW`
     #[cfg(windows)]
     #[test]
-    fn windows_dll_search_opens_bare_names_and_the_first_one_decides() {
-        let missing = "cudakit-not-installed.dll";
-        let checked = preflight(
-            Library::Cublas,
-            [missing, "kernel32.dll"],
-            &[c"GetProcAddress"],
-        )
-        .unwrap();
-        // SAFETY: lookup only; the address is never called
-        assert!(unsafe { checked.get::<*const ()>(b"GetProcAddress\0") }.is_ok());
+    fn windows_preflight_checks_the_opened_dll() {
+        // SAFETY: system DLLs with no caller preconditions
+        let open = |name: &str| unsafe { SharedObject::new(name) }.unwrap();
+        let (kernel32, advapi32) = (open("kernel32.dll"), open("advapi32.dll"));
+        assert!(preflight(Library::Cublas, Some(&kernel32), &[c"GetProcAddress"]).is_ok());
 
-        let error = preflight(
-            Library::Cudnn,
-            ["kernel32.dll", "advapi32.dll"],
-            &[c"CryptAcquireContextW"],
-        )
-        .unwrap_err();
+        let error =
+            preflight(Library::Cudnn, Some(&kernel32), &[c"CryptAcquireContextW"]).unwrap_err();
         unavailable(error.into(), Library::Cudnn);
-        assert!(preflight(Library::Cudnn, ["advapi32.dll"], &[c"CryptAcquireContextW"]).is_ok());
+        assert!(preflight(Library::Cudnn, Some(&advapi32), &[c"CryptAcquireContextW"]).is_ok());
     }
 
     #[test]
-    fn nonexistent_file_is_a_typed_error() {
-        let directory = StubDirectory::new();
-        let missing: &Path = &directory.0.join("missing-library");
+    fn a_library_cudarc_could_not_open_is_a_typed_error() {
         for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
-            unavailable(
-                preflight(library, [missing], &[]).unwrap_err().into(),
-                library,
-            );
+            unavailable(preflight(library, None, &[]).unwrap_err().into(), library);
         }
     }
 }
