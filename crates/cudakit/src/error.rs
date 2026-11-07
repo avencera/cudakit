@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(feature = "libraries")]
 use cudarc::cublas::result::CublasError;
@@ -16,7 +17,8 @@ use crate::tier::{ComputeCapability, PtxTier};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Library {
-    /// The driver API, `libcuda`, installed with the NVIDIA driver
+    /// The driver API, `libcuda` (`nvcuda.dll` on Windows), installed with the NVIDIA
+    /// driver
     Driver,
     /// cuBLAS
     Cublas,
@@ -29,6 +31,7 @@ pub enum Library {
 impl fmt::Display for Library {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Driver if cfg!(windows) => "CUDA driver (nvcuda.dll)",
             Self::Driver => "CUDA driver (libcuda)",
             Self::Cublas => "cuBLAS",
             Self::Cudnn => "cuDNN",
@@ -37,15 +40,87 @@ impl fmt::Display for Library {
     }
 }
 
+impl Library {
+    /// The files cudarc opens for this library on Windows, and where they are found
+    ///
+    /// cudarc's candidates include CUDA 10, 11 and 12 names but no CUDA 13 one, so the
+    /// hints name the CUDA 12 files cudakit's symbols come from, and CUDA 13's as
+    /// unsupported rather than left for the user to discover
+    #[cfg(windows)]
+    fn search_hint(self) -> &'static str {
+        match self {
+            Self::Driver => {
+                "nvcuda.dll comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
+            }
+            Self::Cublas => {
+                "cudakit needs CUDA 12's cublas64_12.dll, which loads cublasLt64_12.dll beside \
+                 it; put the directory holding them on PATH as an absolute path (a CUDA 12 \
+                 toolkit keeps them in %CUDA_PATH_V12_x%\\bin). CUDA 13's cublas64_13.dll, in \
+                 %CUDA_PATH%\\bin\\x64, is not supported yet"
+            }
+            Self::Cudnn => {
+                "cudakit needs cuDNN 9's cudnn64_9.dll; put the directory holding it on PATH as an \
+                 absolute path"
+            }
+            Self::Nvrtc => {
+                "cudakit needs CUDA 12's nvrtc64_120_0.dll; put the directory holding it on PATH \
+                 as an absolute path (a CUDA 12 toolkit keeps it in %CUDA_PATH_V12_x%\\bin). \
+                 CUDA 13's nvrtc64_130_0.dll, in %CUDA_PATH%\\bin\\x64, is not supported yet"
+            }
+        }
+    }
+
+    /// The files cudarc opens for this library on Linux, and where they are found
+    #[cfg(not(windows))]
+    fn search_hint(self) -> &'static str {
+        match self {
+            Self::Driver => {
+                "libcuda.so.1 comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
+            }
+            Self::Cublas => {
+                "cudakit opens a toolkit's libcublas.so, or else libcublas.so.12, through \
+                 LD_LIBRARY_PATH or the ldconfig cache"
+            }
+            Self::Cudnn => {
+                "cudakit opens libcudnn.so, or else libcudnn.so.9, through LD_LIBRARY_PATH or \
+                 the ldconfig cache"
+            }
+            Self::Nvrtc => {
+                "cudakit opens a toolkit's libnvrtc.so, or else libnvrtc.so.12, through \
+                 LD_LIBRARY_PATH or the ldconfig cache"
+            }
+        }
+    }
+}
+
 /// Errors from cudakit
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A CUDA shared library is absent or lacks a required symbol
-    #[error("could not load the {library} shared library")]
+    ///
+    /// The message names the files cudakit looks for and where it looks on this OS
+    #[error(
+        "could not load the {library} shared library, or it lacks a symbol cudakit needs; {}",
+        library.search_hint()
+    )]
     LibraryUnavailable {
         /// The library that failed to load
         library: Library,
+    },
+    /// Windows would load a CUDA library from the current directory or a relative `PATH`
+    /// entry, where a planted DLL would run its code (Windows only)
+    #[error(
+        "refusing to load the {library} shared library from {}, which Windows reaches through \
+         the current directory or a relative PATH entry; put it in the executable's directory \
+         or an absolute PATH entry, or run from another directory",
+        path.display()
+    )]
+    UntrustedLibrary {
+        /// The library that was refused
+        library: Library,
+        /// The file Windows would have loaded
+        path: PathBuf,
     },
     /// The consumer's driver-only policy forbids an optional library
     #[error("driver-only CUDA prohibits a direct request for {library}")]

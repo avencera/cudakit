@@ -10,7 +10,10 @@
 //! exact GPU capability. Manifests bind each cubin to its source PTX
 //!
 //! Parallel work on different areas never edits the same generated file. Plain
-//! [`Project::check`] only hashes and parses files, so it runs anywhere
+//! [`Project::check`] only hashes and parses files, so it runs anywhere, Windows
+//! included. Hashes are over the committed bytes, so a repository checked out on
+//! Windows needs `* text=auto eol=lf` in `.gitattributes`; when a hash fails and a file
+//! it covers has CRLF endings, the error names it
 //!
 //! The consumer's xtask declares one const [`Project`] and forwards its subcommands to
 //! [`Project::build`], [`Project::build_cubins`] and [`Project::check`]
@@ -702,11 +705,7 @@ const fn same(left: &str, right: &str) -> bool {{
     /// and features, the crate's shared files and this area's own module. Other areas'
     /// modules are left out, so a change in one area never marks another area stale
     fn sources_hash(&self, crate_dir: &Path, variant: Variant) -> Result<String> {
-        let mut files = Vec::new();
-        collect_files(crate_dir, crate_dir, &mut files)?;
-        files.retain(|relative| self.belongs_to(relative, variant.area.name));
-        files.sort();
-
+        let files = self.variant_inputs(crate_dir, variant)?;
         let mut digest = Sha256::new();
         let pins = format!(
             "cuda-oxide={} toolchain={} arch={} features={}",
@@ -722,6 +721,27 @@ const fn same(left: &str, right: &str) -> bool {{
         }
 
         Ok(format!("{:x}", digest.finalize()))
+    }
+
+    /// The crate files that feed one variant's PTX, sorted, relative with `/`
+    fn variant_inputs(&self, crate_dir: &Path, variant: Variant) -> Result<Vec<String>> {
+        let mut files = Vec::new();
+        collect_files(crate_dir, crate_dir, &mut files)?;
+        files.retain(|relative| self.belongs_to(relative, variant.area.name));
+        files.sort();
+        Ok(files)
+    }
+
+    /// The inputs of a variant with CRLF line endings, to explain a stale sources hash
+    fn crlf_inputs(&self, crate_dir: &Path, variant: Variant) -> Result<Vec<String>> {
+        let mut crlf = Vec::new();
+        for relative in self.variant_inputs(crate_dir, variant)? {
+            if has_crlf(&fs::read(crate_dir.join(&relative))?) {
+                crlf.push(relative);
+            }
+        }
+
+        Ok(crlf)
     }
 }
 
@@ -769,7 +789,10 @@ impl Ptxas {
         let toolkit = std::env::var_os("CUDA13_HOME")
             .or_else(|| std::env::var_os("CUDA_TOOLKIT_PATH"))
             .ok_or_else(|| eyre!("set CUDA13_HOME or CUDA_TOOLKIT_PATH to the pinned CUDA toolkit; ptxas is never taken from PATH"))?;
-        let path = PathBuf::from(toolkit).join("bin/ptxas");
+        // `ptxas.exe` on Windows, where CUDA 13 keeps executables in `bin` and only its
+        // DLLs in `bin\x64`
+        let ptxas = format!("ptxas{}", std::env::consts::EXE_SUFFIX);
+        let path = PathBuf::from(toolkit).join("bin").join(ptxas);
         let output = Command::new(&path)
             .arg("--version")
             .output()
@@ -851,10 +874,12 @@ impl<'a> ArtifactDirs<'a> {
 
     /// The display form of a generated file, relative to the project root
     fn relative(&self, path: &Path) -> String {
+        // `/` on every OS, as in the project's own paths
         path.strip_prefix(&self.root)
             .unwrap_or(path)
             .display()
             .to_string()
+            .replace('\\', "/")
     }
 
     /// Write each tier crate's source so it embeds exactly the declared files
@@ -1169,8 +1194,16 @@ impl<'a> ArtifactDirs<'a> {
             let ptx_path = self.ptx(variant);
             let ptx = fs::read_to_string(&ptx_path)
                 .map_err(|_| eyre!("missing {}", ptx_path.display()))?;
-
             if project.sources_hash(&crate_dir, variant)? != entry.sources {
+                let crlf = project.crlf_inputs(&crate_dir, variant)?;
+                if !crlf.is_empty() {
+                    bail!(
+                        "kernel sources changed since {} was generated, and {} have CRLF line endings; {CRLF_FIX}",
+                        variant.file_name(),
+                        crlf.join(", ")
+                    );
+                }
+
                 bail!(
                     "kernel sources or build pins changed since {} was generated",
                     variant.file_name()
@@ -1178,6 +1211,13 @@ impl<'a> ArtifactDirs<'a> {
             }
 
             if sha256_hex(ptx.as_bytes()) != entry.ptx {
+                if has_crlf(ptx.as_bytes()) {
+                    bail!(
+                        "{} does not match its manifest and has CRLF line endings; {CRLF_FIX}",
+                        variant.file_name()
+                    );
+                }
+
                 bail!(
                     "{} does not match its manifest; regenerate it instead of editing it",
                     variant.file_name()
@@ -1253,16 +1293,22 @@ impl<'a> ArtifactDirs<'a> {
         project
             .shipped_tiers()
             .into_iter()
-            .filter(|tier| {
-                fs::read_to_string(self.tier_lib(*tier)).ok()
-                    != Some(project.render_tier_lib(*tier))
-            })
-            .map(|tier| {
-                format!(
-                    "{} is stale; run `{} build-cubins` to regenerate it",
-                    self.relative(&self.tier_lib(tier)),
+            .filter_map(|tier| {
+                let path = self.relative(&self.tier_lib(tier));
+                let committed = fs::read_to_string(self.tier_lib(tier)).ok();
+                if committed == Some(project.render_tier_lib(tier)) {
+                    return None;
+                }
+
+                // generated files are always LF, so CRLF here came from the checkout
+                if committed.is_some_and(|text| has_crlf(text.as_bytes())) {
+                    return Some(format!("{path} has CRLF line endings; {CRLF_FIX}"));
+                }
+
+                Some(format!(
+                    "{path} is stale; run `{} build-cubins` to regenerate it",
                     project.command
-                )
+                ))
             })
             .collect()
     }
@@ -1329,6 +1375,19 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()>
     }
 
     Ok(())
+}
+
+/// How to fix files that a Windows checkout gave CRLF line endings
+const CRLF_FIX: &str = "a Windows checkout makes those unless `.gitattributes` sets \
+    `* text=auto eol=lf`, so add that line and check the files out again";
+
+/// Whether a text file has CRLF line endings. Manifests hash the bytes as committed,
+/// which is LF unless the repository commits CRLF, so this only explains a hash that
+/// already failed and never fails one by itself
+fn has_crlf(contents: &[u8]) -> bool {
+    // git treats a file with a NUL byte as binary and never converts its line endings
+    let text = !contents.contains(&0) && std::str::from_utf8(contents).is_ok();
+    text && contents.windows(2).any(|pair| pair == b"\r\n")
 }
 
 /// Length-prefixed so that moving bytes between a name and its contents changes the hash
@@ -1437,6 +1496,27 @@ mod tests {
         let root = std::path::Path::new("/nonexistent/cudakit-build");
         let error = project.check(root, false).unwrap_err().to_string();
         assert!(error.contains("ships sm120 but targets omit it"), "{error}");
+    }
+
+    /// A stale sources hash names the inputs that a Windows checkout gave CRLF endings,
+    /// and leaves binary inputs out
+    #[test]
+    fn crlf_inputs_name_converted_text_files_only() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src");
+        let source = dir.path().join("src/lib.rs");
+        let variant = probe(Tier::Sm75);
+        std::fs::write(&source, "pub fn f() {}\npub fn g() {}\n").expect("LF source");
+        std::fs::write(dir.path().join("blob.bin"), b"\0\r\n").expect("binary input");
+        let lf = PROJECT.sources_hash(dir.path(), variant).expect("LF hash");
+        assert!(PROJECT.crlf_inputs(dir.path(), variant).unwrap().is_empty());
+
+        std::fs::write(&source, "pub fn f() {}\r\npub fn g() {}\r\n").expect("CRLF source");
+        assert_ne!(PROJECT.sources_hash(dir.path(), variant).unwrap(), lf);
+        assert_eq!(
+            PROJECT.crlf_inputs(dir.path(), variant).unwrap(),
+            ["src/lib.rs"]
+        );
     }
 
     #[test]

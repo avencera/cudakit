@@ -4,8 +4,9 @@
 [![docs.rs](https://docs.rs/cudakit/badge.svg)](https://docs.rs/cudakit)
 [![CI](https://github.com/avencera/cudakit/actions/workflows/ci.yml/badge.svg)](https://github.com/avencera/cudakit/actions/workflows/ci.yml)
 
-**A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda` at run
-time and never links or loads the CUDA Runtime (`libcudart`). Building needs no CUDA
+**A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda`
+(`nvcuda.dll` on Windows) at run time and never links or loads the CUDA Runtime
+(`libcudart`). Building needs no CUDA
 toolkit, and running needs only the driver. cuBLAS and cuDNN are optional and also
 loaded at run time. Each one is loaded only when the application's policy allows it,
 and only after a symbol check passes.
@@ -73,10 +74,39 @@ builds free of cudarc.
 
 ## Requirements
 
-- Linux with an NVIDIA driver for CUDA 12.4 or newer. Other platforms are untested
+- Linux, or Windows x86_64 (built and tested in CI, not yet run on a GPU), with an
+  NVIDIA driver for CUDA 12.4 or newer
 - A GPU of compute capability 7.5 (Turing) or newer
-- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested with CUDA 13 and
-  cuDNN 9.27)
+- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested on Linux with CUDA 13
+  and cuDNN 9.27)
+
+### Windows
+
+Windows x86_64 builds with the MSVC toolchain, and CI runs clippy and the unit tests
+there, but nothing has run on a Windows GPU yet.
+
+The driver is `nvcuda.dll`, which the NVIDIA driver installs. With the `libraries`
+feature, cudakit loads the names cudarc looks for, which on Windows are CUDA 10 to 12
+names: it needs CUDA 12's `cublas64_12.dll` (with `cublasLt64_12.dll` beside it) and
+`nvrtc64_120_0.dll`, and cuDNN 9's `cudnn64_9.dll`. Put the directory holding them on
+`PATH` as an absolute path; a CUDA 12 toolkit keeps its DLLs in
+`%CUDA_PATH_V12_x%\bin`. cudarc doesn't look for CUDA 13's `cublas64_13.dll` or `nvrtc64_130_0.dll` (in
+`%CUDA_PATH%\bin\x64`), so a machine with only CUDA 13's libraries can run driver-only
+work but not cuBLAS or NVRTC. When a library is missing, the error names the files and
+`PATH`.
+
+Windows' default DLL search looks in the current directory before `PATH`, so a DLL
+planted in the folder a program runs from would load. Before cudarc opens the driver,
+cuBLAS, cuDNN or NVRTC, cudakit finds the file that search would pick and loads it by
+full path, or fails with `Error::UntrustedLibrary` when the file is in the current
+directory or a relative `PATH` entry (unless that is also the executable's directory, a
+Windows directory or an absolute `PATH` entry). cuBLAS's own import of cuBLASLt then
+comes from its directory, unless a cuBLASLt of that name is already loaded. cuDNN loads its sub-libraries itself, which cudakit doesn't
+control, and `cudarc::cublaslt` calls a consumer makes directly load cuBLASLt through
+cudarc's search, so still run programs from directories you trust.
+
+`identity::DriverIdentity::read` opens `nvml.dll` from System32 only; Windows has no
+sysfs or procfs fallback.
 
 ## Kernel toolchain
 
@@ -84,6 +114,8 @@ builds free of cudarc.
 applications' xtasks call. It builds cuda-oxide kernels to PTX, pins cubins with ptxas,
 generates the PTX tier crates and checks the committed artifacts.
 `scripts/setup-gpu-box.sh` prepares an Ubuntu 24.04 NVIDIA box for those builds.
+Repositories that check artifacts on Windows need `* text=auto eol=lf` in
+`.gitattributes`, since the manifests hash the committed bytes.
 
 ## Development
 

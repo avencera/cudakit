@@ -350,6 +350,11 @@ enum SmLimit {
 
 /// Only the driver is needed before a consumer selects plans
 fn ensure_driver() -> Result<(), Error> {
+    // cudarc's probe below opens the driver with Windows' default search, so the file it
+    // would get is checked and loaded first
+    #[cfg(windows)]
+    crate::dll_search::pin_driver()?;
+
     // SAFETY: driver library initializers have no caller preconditions
     if !unsafe { cudarc::driver::sys::is_culib_present() } {
         return Err(Error::LibraryUnavailable {

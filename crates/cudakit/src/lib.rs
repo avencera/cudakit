@@ -6,6 +6,15 @@
 //! consumer's [`Profile`] allows it, cuBLAS, cuDNN and NVRTC are loaded lazily after a
 //! symbol preflight.
 //!
+//! It runs on Linux and Windows x86_64. On Windows the driver is `nvcuda.dll`, and the
+//! libraries are the names cudarc looks for: CUDA 12's `cublas64_12.dll` and
+//! `nvrtc64_120_0.dll` and cuDNN 9's `cudnn64_9.dll`, found in the executable's
+//! directory, System32 or an absolute `PATH` entry. CUDA 13's `cublas64_13.dll` and
+//! `nvrtc64_130_0.dll` are not among them. A library that Windows would load from the
+//! current directory or a relative `PATH` entry fails with
+//! [`Error::UntrustedLibrary`] instead. CI builds and tests the Windows build, but it
+//! hasn't run on a GPU yet.
+//!
 //! - [`Gpu`] owns one context and one stream, the device attributes and the optional
 //!   library handles
 //! - [`Runtime`] adds a module cache for a consumer's [`KernelArea`]s: embedded PTX and
@@ -24,6 +33,9 @@
 mod artifact;
 mod conv;
 mod device;
+// Windows only, plus its host-only tests everywhere
+#[cfg(any(windows, test))]
+mod dll_search;
 #[cfg(feature = "libraries")]
 pub mod dnn;
 mod error;

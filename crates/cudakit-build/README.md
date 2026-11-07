@@ -59,6 +59,10 @@ bump never makes your committed artifacts stale. The
 covers the details, and the repository's `scripts/setup-gpu-box.sh` prepares an Ubuntu
 24.04 NVIDIA box with the same pins.
 
+`check` also runs on Windows. Manifests hash the committed bytes, so a repository
+checked out there needs `* text=auto eol=lf` in `.gitattributes`; when a hash fails and
+a file it covers has CRLF endings, `check` names the file.
+
 ## License
 
 Apache-2.0

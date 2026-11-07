@@ -50,20 +50,21 @@ dependencies = [
 
 [[package]]
 name = "cudakit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cudarc",
  "libloading",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
 
 [[package]]
 name = "cudakit-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eyre",
  "sha2",

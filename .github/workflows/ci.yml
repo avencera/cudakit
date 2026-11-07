@@ -11,7 +11,13 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    name: check (${{ matrix.os }})
+    # Windows builds and tests the same crates; neither runner has a GPU
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,12 +25,16 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+        if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       # without the libraries feature, only the driver API compiles
       - run: cargo clippy -p cudakit --all-targets -- -D warnings
       # GPU tests skip without CUDAKIT_REQUIRE_GPU=1; hosted runners have no GPU
       - run: cargo test --workspace --all-features
+      # the crate READMEs and LICENSEs are symlinks, which a Windows checkout writes as
+      # plain files holding the link's target, so only Linux packages
       - run: cargo package --workspace
+        if: runner.os == 'Linux'
 
   docs:
     runs-on: ubuntu-24.04

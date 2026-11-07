@@ -2,6 +2,7 @@
 //! identities kept apart so they are never saved as a release
 
 use std::ffi::{CStr, c_char, c_uint};
+use std::io;
 
 use libloading::Library;
 
@@ -25,9 +26,9 @@ use crate::Error;
 pub enum DriverRelease {
     /// `nvmlSystemGetDriverVersion`
     Nvml(String),
-    /// First line of `/sys/module/nvidia/version`
+    /// First line of `/sys/module/nvidia/version` (Linux only)
     Sysfs(String),
-    /// First line of `/proc/driver/nvidia/version`
+    /// First line of `/proc/driver/nvidia/version` (Linux only)
     Procfs(String),
 }
 
@@ -43,13 +44,13 @@ pub enum DriverIdentity {
 impl DriverIdentity {
     /// Reads NVML, then sysfs, then procfs, then the CUDA API level
     ///
+    /// NVML is `libnvidia-ml.so.1` on Linux and `nvml.dll`, which the driver installs in
+    /// System32, on Windows. Windows has no sysfs or procfs, so there a missing NVML
+    /// falls straight through to the API level
+    ///
     /// Call it with a live CUDA context; NVML is loaded and released within the call
     pub fn read() -> Result<Self, Error> {
-        Self::select(
-            nvml_version,
-            |path| std::fs::read_to_string(path),
-            cuda_version,
-        )
+        Self::select(nvml_version, driver_file, cuda_version)
     }
 
     fn select(
@@ -94,9 +95,36 @@ fn first_line(text: &str) -> Option<String> {
 }
 
 fn nvml_version() -> Option<String> {
+    nvml_version_from_library(&open_nvml()?)
+}
+
+#[cfg(not(windows))]
+fn open_nvml() -> Option<Library> {
     // safety: NVML library initializers have no caller preconditions
-    let library = unsafe { Library::new("libnvidia-ml.so.1") }.ok()?;
-    nvml_version_from_library(&library)
+    unsafe { Library::new("libnvidia-ml.so.1") }.ok()
+}
+
+/// The driver installs `nvml.dll` in System32, so only System32 is searched, never the
+/// current directory
+#[cfg(windows)]
+fn open_nvml() -> Option<Library> {
+    use libloading::os::windows::{LOAD_LIBRARY_SEARCH_SYSTEM32, Library as WindowsLibrary};
+
+    // safety: NVML library initializers have no caller preconditions
+    unsafe { WindowsLibrary::load_with_flags("nvml.dll", LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .ok()
+        .map(Library::from)
+}
+
+/// Reads a Linux driver file. On Windows, `/sys/...` would name a file under the
+/// current drive's root, where a user without admin rights can usually create
+/// files, so nothing is read there
+fn driver_file(path: &str) -> io::Result<String> {
+    if cfg!(windows) {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+
+    std::fs::read_to_string(path)
 }
 
 fn nvml_version_from_library(library: &Library) -> Option<String> {
@@ -289,6 +317,8 @@ mod tests {
         }
     }
 
+    /// The stub is compiled with `cc`, which Windows runners lack
+    #[cfg(unix)]
     #[test]
     fn nvml_symbols_return_the_release_and_balance_initialization() {
         use std::process::Command;

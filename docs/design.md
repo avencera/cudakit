@@ -4,8 +4,8 @@ cudakit is the CUDA host stack shared by speakrs (diarization) and scriptrs (Par
 ASR). It started as the CUDA layer of speakrs 0.7.0.
 
 The property every change must keep: **a build needs no CUDA toolkit, and a process
-loads only the NVIDIA driver (`libcuda`) plus, when a consumer allows it, cuBLAS,
-cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
+loads only the NVIDIA driver (`libcuda`, or `nvcuda.dll` on Windows) plus, when a
+consumer allows it, cuBLAS, cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
 the crate is not called `cuda-runtime`.
 
 ## Crate boundary
