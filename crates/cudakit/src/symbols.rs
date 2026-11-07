@@ -1,4 +1,5 @@
-//! Library entry points that cudakit checks before cudarc loads a library
+//! Library entry points that cudakit checks in a library cudarc has opened, before any
+//! call into it
 //!
 //! Each list covers the functions reached by cudakit's own wrappers and the cudarc
 //! code they call, including handle and descriptor destructors and version queries.

@@ -4,11 +4,12 @@
 [![docs.rs](https://docs.rs/cudakit/badge.svg)](https://docs.rs/cudakit)
 [![CI](https://github.com/avencera/cudakit/actions/workflows/ci.yml/badge.svg)](https://github.com/avencera/cudakit/actions/workflows/ci.yml)
 
-**A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda` at run
-time and never links or loads the CUDA Runtime (`libcudart`). Building needs no CUDA
+**A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda`
+(`nvcuda.dll` on Windows) at run time and never links or loads the CUDA Runtime
+(`libcudart`). Building needs no CUDA
 toolkit, and running needs only the driver. cuBLAS and cuDNN are optional and also
 loaded at run time. Each one is loaded only when the application's policy allows it,
-and only after a symbol check passes.
+and used only after a symbol check of the loaded library passes.
 
 cudakit is the shared GPU layer of [speakrs](https://github.com/avencera/speakrs)
 (speaker diarization) and [scriptrs](https://github.com/avencera/scriptrs) (speech
@@ -38,7 +39,7 @@ whichever thread calls it.
 
 ```toml
 [dependencies]
-cudakit = { version = "0.1", features = ["libraries"] }
+cudakit = { version = "0.2", features = ["libraries"] }
 ```
 
 ```rust
@@ -73,10 +74,45 @@ builds free of cudarc.
 
 ## Requirements
 
-- Linux with an NVIDIA driver for CUDA 12.4 or newer. Other platforms are untested
+- Linux, or Windows x86_64 (built and tested in CI, not yet run on a GPU), with an
+  NVIDIA driver for CUDA 12.4 or newer
 - A GPU of compute capability 7.5 (Turing) or newer
-- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested with CUDA 13 and
-  cuDNN 9.27)
+- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested on Linux with CUDA 13
+  and cuDNN 9.27)
+
+### Windows
+
+Windows x86_64 builds with the MSVC toolchain, and CI runs clippy and the unit tests
+there, but nothing has run on a Windows GPU yet.
+
+The driver is `nvcuda.dll`, which the NVIDIA driver installs, and it loads only from
+System32. With the `libraries` feature, cudakit opens CUDA 12's or CUDA 13's cuBLAS
+(`cublas64_12.dll` or `cublas64_13.dll`, with the matching cuBLASLt beside it) and NVRTC
+(`nvrtc64_120_0.dll` or `nvrtc64_130_0.dll`), and cuDNN 9's `cudnn64_9.dll`. It looks in
+the executable's directory and System32, then each absolute `PATH` entry, then
+`%CUDA_PATH%\bin\x64` (where CUDA 13 keeps its DLLs) and `%CUDA_PATH%\bin` (CUDA 12).
+When a library is missing or lacks a symbol cudakit needs, the error names the files and
+where it looked.
+
+Windows' default DLL search looks in the current directory before `PATH`, so a DLL
+planted in the folder a program runs from would load. cudakit's loading comes from
+[`cudakit-cudarc`](https://crates.io/crates/cudakit-cudarc), a cudarc fork that never
+loads from the current directory or a relative `PATH` entry, and loads each DLL by full
+path so its imports come from its own directory. cuDNN loads its own sub-libraries,
+which neither controls, so still run programs from directories you trust.
+
+`identity::DriverIdentity::read` opens `nvml.dll` from System32 only; Windows has no
+sysfs or procfs fallback.
+
+### cudarc
+
+cudakit depends on `cudakit-cudarc`, a fork of cudarc 0.19.10 whose library is still
+named `cudarc`, and re-exports it as `cudakit::cudarc`. Besides the Windows rules above,
+it opens versioned Linux sonames (`libcublas.so.13`, `libcublas.so.12`) before a
+toolkit's unversioned `libcublas.so`, so a process never holds two copies of cuBLAS or
+pairs one install's cuBLAS with another's cuBLASLt. Reach cudarc through
+`cudakit::cudarc` rather than depending on upstream `cudarc` too: two copies of cudarc
+in one binary would each open their own libraries.
 
 ## Kernel toolchain
 
@@ -84,6 +120,8 @@ builds free of cudarc.
 applications' xtasks call. It builds cuda-oxide kernels to PTX, pins cubins with ptxas,
 generates the PTX tier crates and checks the committed artifacts.
 `scripts/setup-gpu-box.sh` prepares an Ubuntu 24.04 NVIDIA box for those builds.
+Repositories that check artifacts on Windows need `* text=auto eol=lf` in
+`.gitattributes`, since the manifests hash the committed bytes.
 
 ## Development
 

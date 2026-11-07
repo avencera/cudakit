@@ -3,7 +3,7 @@ members = ["crates/cudakit", "crates/cudakit-build"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/avencera/cudakit"
@@ -11,7 +11,10 @@ authors = ["Praveen Perera"]
 homepage = "https://github.com/avencera/cudakit"
 
 [workspace.dependencies]
-cudarc = { version = "0.19.10", default-features = false, features = [
+# cudakit-cudarc is cudarc 0.19.10 with library-loading fixes: versioned Linux sonames
+# first, CUDA 13 Windows DLL names, and no Windows load from the current directory. Its
+# library is still `cudarc`
+cudarc = { package = "cudakit-cudarc", version = "0.19.10", default-features = false, features = [
     "std",
     "driver",
     # the precompiled `Ptx` type requires this feature but does not load NVRTC

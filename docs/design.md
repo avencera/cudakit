@@ -4,8 +4,8 @@ cudakit is the CUDA host stack shared by speakrs (diarization) and scriptrs (Par
 ASR). It started as the CUDA layer of speakrs 0.7.0.
 
 The property every change must keep: **a build needs no CUDA toolkit, and a process
-loads only the NVIDIA driver (`libcuda`) plus, when a consumer allows it, cuBLAS,
-cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
+loads only the NVIDIA driver (`libcuda`, or `nvcuda.dll` on Windows) plus, when a
+consumer allows it, cuBLAS, cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
 the crate is not called `cuda-runtime`.
 
 ## Crate boundary
@@ -84,10 +84,13 @@ decides whether that code exists. Policy is per consumer, not per Cargo feature,
 binary that links both speakrs (driver-only) and scriptrs (cuBLAS) cannot make speakrs
 load cuBLAS through feature unification.
 
-Library loading runs a preflight: before cudarc touches a library, cudakit
-opens the same file cudarc would pick and checks every symbol cudakit's wrappers or the
-consumer's `extra_symbols` call. A missing symbol is `Error::LibraryUnavailable`, never
-a panic inside cudarc, and never a silent fall-through to another version.
+Library loading runs a preflight: before cudakit makes a cudarc call into a library, it
+asks cudarc to open the library and checks every symbol cudakit's wrappers or the
+consumer's `extra_symbols` call on that same handle, which cudarc keeps for the process.
+A missing symbol is `Error::LibraryUnavailable`, never a panic inside cudarc, and never a
+silent fall-through to another version. The handle comes from `cudakit-cudarc`, a cudarc
+0.19.10 fork whose library is still `cudarc`: it opens versioned Linux sonames before a
+toolkit's unversioned name and never loads a Windows DLL from the current directory.
 
 ### Kernel areas and PTX tier crates
 
@@ -160,7 +163,7 @@ cudakit/
 
 | Feature | Adds |
 | --- | --- |
-| (none) | driver API only: `cudarc` with `driver`, `nvrtc` (for the `Ptx` type; NVRTC is not loaded), `dynamic-loading`, `cuda-12040` |
+| (none) | driver API only: `cudarc` (the `cudakit-cudarc` package) with `driver`, `nvrtc` (for the `Ptx` type; NVRTC is not loaded), `dynamic-loading`, `cuda-12040` |
 | `libraries` | `cudarc/cublas`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `dnn` |
 | `serde` | serde for `DriverRelease` |
 | `test-support` | fixtures for consumers' host-only tests |

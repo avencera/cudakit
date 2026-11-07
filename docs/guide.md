@@ -13,7 +13,7 @@ cuda = ["dep:cudakit", "cudakit/libraries"]         # library-first build
 cuda-sm75 = ["dep:cudakit", "dep:myapp-ptx-sm75"]   # one per tier you ship
 
 [dependencies]
-cudakit = { version = "0.1", optional = true }
+cudakit = { version = "0.2", optional = true }
 ```
 
 Enable cudakit only from your CUDA features, so CPU builds never compile cudarc.
@@ -51,8 +51,8 @@ anything is looked up, even when another crate in the binary enabled the `librar
 feature.
 
 If you call cuBLAS or cuDNN entry points directly, beyond cudakit's wrappers, list them
-in `extra_symbols`. The preflight then rejects a library that lacks them before cudarc
-loads it. `unsafe fn Gpu::blas(math)` hands out the shared cuBLAS handle under its mode
+in `extra_symbols`. Once cudarc opens a library, the preflight checks its handle and
+rejects a library that lacks them before any call into it. `unsafe fn Gpu::blas(math)` hands out the shared cuBLAS handle under its mode
 lock; leave its pointer mode, math mode, stream and workspace as they are.
 
 ## 3. Kernel areas
@@ -253,6 +253,12 @@ PROJECT.check(&workspace_root, false)?;
   included, so write your wrapper as a pass-through
   (`($($variant:tt)*) => { cudakit::embed_tier!(..; $($variant)*) }`)
 - `ptx_lint` is public for consumers that lint PTX outside `check`
+- `build` and `build_cubins` take ptxas from `$CUDA13_HOME/bin` or
+  `$CUDA_TOOLKIT_PATH/bin`, never from `PATH`. On Windows that is `ptxas.exe`; set
+  `CUDA13_HOME` to the toolkit, such as `%CUDA_PATH_V13_0%`
+- `check` runs on Windows too, given LF line endings: manifests hash the committed
+  bytes, so put `* text=auto eol=lf` in your `.gitattributes`. When a hash fails and a
+  file it covers has CRLF endings, `check` names the file. `build` has only run on Linux
 
 `scripts/setup-gpu-box.sh --probe <kernel-crate>` prepares an Ubuntu 24.04 NVIDIA box
 with the same pins.

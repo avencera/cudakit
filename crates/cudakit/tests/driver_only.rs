@@ -3,6 +3,12 @@
 //!
 //! This is its own test binary so no other test can have loaded a library first. Like
 //! `tests/gpu.rs`, it touches the device only with `CUDAKIT_REQUIRE_GPU=1`
+//!
+//! It stays Linux-only. The policy it proves, refusing every library before any lookup,
+//! is the same code on every OS, and only the way it reads the loaded libraries
+//! (`/proc/self/maps`) is Linux's. A Windows version would list modules with
+//! `K32EnumProcessModules` instead, but it needs a GPU to run and there is no Windows
+//! GPU runner, so it would be code that has never run
 
 #![cfg(target_os = "linux")]
 

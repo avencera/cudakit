@@ -16,8 +16,9 @@ pub enum LibraryPolicy {
 /// Library entry points a consumer calls directly through cudarc, beyond the ones
 /// cudakit's own wrappers reach
 ///
-/// The preflight checks these before cudarc touches the library, so a missing symbol
-/// is a typed [`Error::LibraryUnavailable`] instead of a panic inside cudarc
+/// The preflight checks these once cudarc opens the library and before any call into
+/// it, so a missing symbol is a typed [`Error::LibraryUnavailable`] instead of a panic
+/// inside cudarc
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExtraSymbols {
     /// Extra cuBLAS symbols

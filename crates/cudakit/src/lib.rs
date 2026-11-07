@@ -3,8 +3,14 @@
 //! cudakit loads the NVIDIA driver (`libcuda`) at run time through cudarc and never
 //! loads the CUDA Runtime (`libcudart`), so a build needs no CUDA toolkit and a
 //! process needs only the driver. With the `libraries` feature, and only when the
-//! consumer's [`Profile`] allows it, cuBLAS, cuDNN and NVRTC are loaded lazily after a
-//! symbol preflight.
+//! consumer's [`Profile`] allows it, cuBLAS, cuDNN and NVRTC are loaded lazily, and
+//! used only after a symbol preflight of the loaded library.
+//!
+//! It runs on Linux and Windows x86_64. On Windows the driver is `nvcuda.dll` from
+//! System32, and the libraries are CUDA 12's or 13's `cublas64_*.dll` and
+//! `nvrtc64_*0_0.dll` and cuDNN 9's `cudnn64_9.dll`, found in an absolute `PATH` entry
+//! or `%CUDA_PATH%\bin\x64` and `%CUDA_PATH%\bin`, never in the current directory.
+//! CI builds and tests the Windows build, but it hasn't run on a GPU yet.
 //!
 //! - [`Gpu`] owns one context and one stream, the device attributes and the optional
 //!   library handles

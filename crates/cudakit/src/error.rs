@@ -16,7 +16,8 @@ use crate::tier::{ComputeCapability, PtxTier};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Library {
-    /// The driver API, `libcuda`, installed with the NVIDIA driver
+    /// The driver API, `libcuda` (`nvcuda.dll` on Windows), installed with the NVIDIA
+    /// driver
     Driver,
     /// cuBLAS
     Cublas,
@@ -29,6 +30,7 @@ pub enum Library {
 impl fmt::Display for Library {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Driver if cfg!(windows) => "CUDA driver (nvcuda.dll)",
             Self::Driver => "CUDA driver (libcuda)",
             Self::Cublas => "cuBLAS",
             Self::Cudnn => "cuDNN",
@@ -37,12 +39,71 @@ impl fmt::Display for Library {
     }
 }
 
+impl Library {
+    /// The files cudarc opens for this library on Windows, and where they are found
+    ///
+    /// The driver loads only from System32. Other libraries are looked for in the
+    /// executable's directory and System32, then each absolute `PATH` entry, then
+    /// `%CUDA_PATH%\bin\x64` and `%CUDA_PATH%\bin`, never in the current directory
+    #[cfg(windows)]
+    fn search_hint(self) -> &'static str {
+        match self {
+            Self::Driver => {
+                "nvcuda.dll comes with the NVIDIA driver and loads only from System32; install \
+                 a driver for CUDA 12.4 or newer"
+            }
+            Self::Cublas => {
+                "cudakit opens CUDA 12's cublas64_12.dll or CUDA 13's cublas64_13.dll, with the \
+                 matching cublasLt beside it, from the executable's directory, System32, an \
+                 absolute PATH entry, %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin \
+                 (CUDA 12)"
+            }
+            Self::Cudnn => {
+                "cudakit opens cuDNN 9's cudnn64_9.dll from the executable's directory, System32, \
+                 an absolute PATH entry, %CUDA_PATH%\\bin\\x64 or %CUDA_PATH%\\bin"
+            }
+            Self::Nvrtc => {
+                "cudakit opens CUDA 12's nvrtc64_120_0.dll or CUDA 13's nvrtc64_130_0.dll from \
+                 the executable's directory, System32, an absolute PATH entry, \
+                 %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin (CUDA 12)"
+            }
+        }
+    }
+
+    /// The files cudarc opens for this library on Linux, and where they are found
+    #[cfg(not(windows))]
+    fn search_hint(self) -> &'static str {
+        match self {
+            Self::Driver => {
+                "libcuda.so.1 comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
+            }
+            Self::Cublas => {
+                "cudakit opens libcublas.so.12 or libcublas.so.13, or else a toolkit's \
+                 unversioned libcublas.so, through LD_LIBRARY_PATH or the ldconfig cache"
+            }
+            Self::Cudnn => {
+                "cudakit opens libcudnn.so.9, or else an unversioned libcudnn.so, through \
+                 LD_LIBRARY_PATH or the ldconfig cache"
+            }
+            Self::Nvrtc => {
+                "cudakit opens libnvrtc.so.12 or libnvrtc.so.13, or else a toolkit's \
+                 unversioned libnvrtc.so, through LD_LIBRARY_PATH or the ldconfig cache"
+            }
+        }
+    }
+}
+
 /// Errors from cudakit
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A CUDA shared library is absent or lacks a required symbol
-    #[error("could not load the {library} shared library")]
+    ///
+    /// The message names the files cudakit looks for and where it looks on this OS
+    #[error(
+        "could not load the {library} shared library, or it lacks a symbol cudakit needs; {}",
+        library.search_hint()
+    )]
     LibraryUnavailable {
         /// The library that failed to load
         library: Library,
