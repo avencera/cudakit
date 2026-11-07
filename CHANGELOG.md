@@ -17,8 +17,9 @@ yet.
 - Windows x86_64 with the MSVC toolchain. The driver is `nvcuda.dll` from System32.
   The `libraries` feature opens CUDA 12's or CUDA 13's cuBLAS and NVRTC
   (`cublas64_12.dll`, `cublas64_13.dll`, `nvrtc64_120_0.dll`, `nvrtc64_130_0.dll`) and
-  cuDNN 9's `cudnn64_9.dll` from absolute `PATH` entries, `%CUDA_PATH%\bin\x64` and
-  `%CUDA_PATH%\bin`, never from the current directory or a relative `PATH` entry
+  cuDNN 9's `cudnn64_9.dll` from the executable's directory, System32, absolute `PATH`
+  entries, `%CUDA_PATH%\bin\x64` and `%CUDA_PATH%\bin`, never from the current
+  directory or a relative `PATH` entry
 - The symbol preflight checks the library handle cudarc itself opened, instead of
   repeating cudarc's search
 - `Error::LibraryUnavailable` names the files cudakit looks for and where: `PATH` and

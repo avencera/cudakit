@@ -89,8 +89,9 @@ The driver is `nvcuda.dll`, which the NVIDIA driver installs, and it loads only 
 System32. With the `libraries` feature, cudakit opens CUDA 12's or CUDA 13's cuBLAS
 (`cublas64_12.dll` or `cublas64_13.dll`, with the matching cuBLASLt beside it) and NVRTC
 (`nvrtc64_120_0.dll` or `nvrtc64_130_0.dll`), and cuDNN 9's `cudnn64_9.dll`. It looks in
-each absolute `PATH` entry, then `%CUDA_PATH%\bin\x64` (where CUDA 13 keeps its DLLs) and
-`%CUDA_PATH%\bin` (CUDA 12). When a library is missing, the error names the files and
+the executable's directory and System32, then each absolute `PATH` entry, then
+`%CUDA_PATH%\bin\x64` (where CUDA 13 keeps its DLLs) and `%CUDA_PATH%\bin` (CUDA 12).
+When a library is missing or lacks a symbol cudakit needs, the error names the files and
 where it looked.
 
 Windows' default DLL search looks in the current directory before `PATH`, so a DLL

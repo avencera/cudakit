@@ -42,8 +42,9 @@ impl fmt::Display for Library {
 impl Library {
     /// The files cudarc opens for this library on Windows, and where they are found
     ///
-    /// Besides System32 for the driver, cudarc looks only in absolute `PATH` entries and
-    /// under `%CUDA_PATH%`, never in the current directory
+    /// The driver loads only from System32. Other libraries are looked for in the
+    /// executable's directory and System32, then each absolute `PATH` entry, then
+    /// `%CUDA_PATH%\bin\x64` and `%CUDA_PATH%\bin`, never in the current directory
     #[cfg(windows)]
     fn search_hint(self) -> &'static str {
         match self {
@@ -53,17 +54,18 @@ impl Library {
             }
             Self::Cublas => {
                 "cudakit opens CUDA 12's cublas64_12.dll or CUDA 13's cublas64_13.dll, with the \
-                 matching cublasLt beside it, from an absolute PATH entry, %CUDA_PATH%\\bin\\x64 \
-                 (CUDA 13) or %CUDA_PATH%\\bin (CUDA 12)"
+                 matching cublasLt beside it, from the executable's directory, System32, an \
+                 absolute PATH entry, %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin \
+                 (CUDA 12)"
             }
             Self::Cudnn => {
-                "cudakit opens cuDNN 9's cudnn64_9.dll from an absolute PATH entry or under \
-                 %CUDA_PATH%\\bin"
+                "cudakit opens cuDNN 9's cudnn64_9.dll from the executable's directory, System32, \
+                 an absolute PATH entry, %CUDA_PATH%\\bin\\x64 or %CUDA_PATH%\\bin"
             }
             Self::Nvrtc => {
                 "cudakit opens CUDA 12's nvrtc64_120_0.dll or CUDA 13's nvrtc64_130_0.dll from \
-                 an absolute PATH entry, %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin \
-                 (CUDA 12)"
+                 the executable's directory, System32, an absolute PATH entry, \
+                 %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin (CUDA 12)"
             }
         }
     }
@@ -76,15 +78,16 @@ impl Library {
                 "libcuda.so.1 comes with the NVIDIA driver; install one for CUDA 12.4 or newer"
             }
             Self::Cublas => {
-                "cudakit opens libcublas.so.12 or libcublas.so.13 through LD_LIBRARY_PATH or \
-                 the ldconfig cache"
+                "cudakit opens libcublas.so.12 or libcublas.so.13, or else a toolkit's \
+                 unversioned libcublas.so, through LD_LIBRARY_PATH or the ldconfig cache"
             }
             Self::Cudnn => {
-                "cudakit opens libcudnn.so.9 through LD_LIBRARY_PATH or the ldconfig cache"
+                "cudakit opens libcudnn.so.9, or else an unversioned libcudnn.so, through \
+                 LD_LIBRARY_PATH or the ldconfig cache"
             }
             Self::Nvrtc => {
-                "cudakit opens libnvrtc.so.12 or libnvrtc.so.13 through LD_LIBRARY_PATH or the \
-                 ldconfig cache"
+                "cudakit opens libnvrtc.so.12 or libnvrtc.so.13, or else a toolkit's \
+                 unversioned libnvrtc.so, through LD_LIBRARY_PATH or the ldconfig cache"
             }
         }
     }
