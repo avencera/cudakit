@@ -5,7 +5,7 @@ ASR). It started as the CUDA layer of speakrs 0.7.0.
 
 The property every change must keep: **a build needs no CUDA toolkit, and a process
 loads only the NVIDIA driver (`libcuda`, or `nvcuda.dll` on Windows) plus, when a
-consumer allows it, cuBLAS, cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
+consumer allows it, cuBLAS, cuBLASLt, cuDNN and NVRTC.** It never loads the CUDA Runtime (`libcudart`). That is also why
 the crate is not called `cuda-runtime`.
 
 ## Crate boundary
@@ -77,7 +77,7 @@ Errors are one `cudakit::Error` enum, which consumers map onto their own error t
 
 ### Driver-only policy
 
-`LibraryPolicy::DriverOnly` makes every cuBLAS/cuDNN/NVRTC request fail with
+`LibraryPolicy::DriverOnly` makes every cuBLAS/cuBLASLt/cuDNN/NVRTC request fail with
 `Error::LibraryForbidden` before any lookup, and makes `open` fail when the build's GPU
 target features cannot serve the device natively. The cudakit `libraries` feature only
 decides whether that code exists. Policy is per consumer, not per Cargo feature, so a
@@ -91,6 +91,14 @@ A missing symbol is `Error::LibraryUnavailable`, never a panic inside cudarc, an
 silent fall-through to another version. The handle comes from `cudakit-cudarc`, a cudarc
 0.19.10 fork whose library is still `cudarc`: it opens versioned Linux sonames before a
 toolkit's unversioned name and never loads a Windows DLL from the current directory.
+
+cuBLASLt comes from the same loader. libcublas imports libcublasLt by soname, and the
+fork opens cuBLASLt by that soname too, so cudakit's matmul plans, cuBLAS's own GEMMs
+and a consumer's direct `cudarc::cublaslt` calls all reach one loaded file. The fork
+tries the build's CUDA major (12) before 13, so on a machine with both it picks 12.
+cudakit does not check that cuBLAS and cuBLASLt come from one directory: when a host
+already loaded another install's cuBLASLt by path, libcublas binds that one, and a
+mismatched pair can fail its first GEMM with `CUBLAS_STATUS_NOT_INITIALIZED`.
 
 ### Kernel areas and PTX tier crates
 
@@ -164,8 +172,8 @@ cudakit/
 | Feature | Adds |
 | --- | --- |
 | (none) | driver API only: `cudarc` (the `cudakit-cudarc` package) with `driver`, `nvrtc` (for the `Ptx` type; NVRTC is not loaded), `dynamic-loading`, `cuda-12040` |
-| `libraries` | `cudarc/cublas`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `dnn` |
-| `serde` | serde for `DriverRelease` |
+| `libraries` | `cudarc/cublas`, `cudarc/cublaslt`, `cudarc/cudnn`, the preflight, `Sgemm`/`SgemmBatched` execution, `MatmulPlan`, `MatmulCache`, `dnn` |
+| `serde` | serde for `DriverRelease`, `Math`, `Operands`, `Output`, `Epilogue`, `Matmul`, `MatmulAlgo` and `Tuning` |
 | `test-support` | fixtures for consumers' host-only tests |
 
 Consumers make cudakit an optional dependency enabled only by their CUDA features, so CPU
@@ -182,7 +190,41 @@ and CoreML builds stay free of cudarc.
 - Tier helpers that encode one application's Cargo features or environment variables
   (choosing a tier from an env var, mapping tiers to feature names beyond the
   `Profile`) stay in that application.
-- Tune files stay in consumers; cudakit provides only the driver release they key on.
+- Tune files stay in consumers; cudakit provides only the driver release and library
+  versions they key on.
+- A `MatmulPlan` fixes one cuBLASLt algorithm, since the algorithm decides the
+  summation order and so the output bits. The heuristic's first pick can be well off on
+  small or odd shapes (1.49x on 32-row and 1.25x on 201-row TF32 products on an RTX 5090
+  in sam3rs), so `Gpu::tune_matmul` times its top candidates, opt in, per shape. A
+  candidate replaces the first only when it is faster by more than `Tuning::margin`
+  (1.05): without a margin, near-ties flip on timing noise and outputs change from one
+  process to the next. A consumer that needs identical outputs across processes
+  persists the chosen `MatmulAlgo`, which cuBLASLt documents as reusable with the same
+  library version, and builds plans with `matmul_plan_with`.
+- Tuning times constant-filled scratch buffers with events and synchronizes, so it
+  fails with `Error::Capturing` during a capture rather than breaking it; so does a
+  library's first `prepare`, which allocates. Building a heuristic plan is host-only
+  and works anywhere, so `MatmulCache` without tuning can fill during a capture, and a
+  tuned cache must see each shape once before. One 32 MiB workspace serves every plan,
+  and a graph captures its fixed address. Products run in order on the GPU's stream,
+  but one `cublasLtMatmul` can queue a split-K kernel and its reduction separately, so
+  every matmul call, and every `Graph::launch` after cuBLASLt was prepared, queues
+  under one lock; otherwise another thread's product could land between the two and
+  overwrite the partial sums.
+- cudakit asks the heuristic for algorithms that need only 16-byte alignment
+  (`MATMUL_ALIGNMENT`) instead of its default 256, so views into a larger buffer work;
+  `Gpu::matmul` checks every pointer against it. The bias always takes the output's
+  type, which cuBLASLt requires, and row strides below the row length are refused up
+  front because cuBLASLt rejects overlapping rows.
+- Accumulation is FP32 for every output. By default cuBLASLt may reduce split-K
+  partial sums in place or in the output type, which for an FP16 output can overflow
+  where the full sum would not, so a 16-bit output allows only reductions in the FP32
+  compute type, both in the heuristic and in `matmul_plan_with`'s check of a stored
+  algorithm.
+- A plan's descriptor carries the bias pointer, which changes per call, so each call
+  sets it and launches under the plan's lock; the lock is uncontended in a
+  single-stream model and a plan is `Send + Sync`.
+- Consumers reach cuBLASLt only through plans, so `ExtraSymbols` has no cuBLASLt list.
 - The cuBLAS handle is shared with cudakit's GEMMs, which pass host scalars in the math
   mode they lock, so raw access is `unsafe fn Gpu::blas(math)`: the caller must leave
   pointer mode, math mode, stream and workspace alone. cudarc's event-tracking pause
@@ -196,5 +238,7 @@ and CoreML builds stay free of cudarc.
   never leave that thread. `Graph` is `Send` only, since CUDA forbids launching one
   executable graph from two threads at once. A context is current per thread, and
   cudarc binds it for allocations, copies, launches and graphs but not for cuBLAS,
-  cuDNN, function lookup or occupancy queries, so cudakit binds before each of those
-  and before the library handles are destroyed in `Gpu`'s drop.
+  cuBLASLt, cuDNN, function lookup or occupancy queries, so cudakit binds before each of those
+  and before the library handles are destroyed in `Gpu`'s drop. A `MatmulPlan` keeps
+  its context and binds it before destroying its cuBLASLt descriptors, since a plan
+  can drop on any thread.

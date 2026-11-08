@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.0
+
+cuBLASLt matmul plans with a fixed or tuned algorithm and fused epilogues.
+
+### cudakit
+
+Changed:
+
+- A library's first `Gpu::prepare` fails with the new `Error::Capturing` while the
+  GPU's stream is being captured, since it allocates; preparing again works anywhere.
+  `Gpu::library_versions` prepares through the same check
+
+Added:
+
+- `MatmulPlan`: row-major cuBLASLt products with one fixed algorithm. Operands are
+  FP32 (`Math::Fp32` or `Math::Tf32`), FP32 on BF16 tensor cores (`F32Fast16Bf`), FP16
+  or BF16; `Output` is FP32, or FP16 or BF16 for operands of that type. `Epilogue`
+  fuses bias, ReLU and GELU, with the bias in the output's type. `with_strides`
+  describes views with wider rows and refuses overlapping ones. `Gpu::matmul` and
+  `Gpu::matmul_bias` take any `DevicePtr` and `Scale` (`alpha` and `beta`) per call.
+  `Gpu::matmul_candidates` lists the heuristic's algorithms best first,
+  `Gpu::matmul_plan_with` checks a stored `MatmulAlgo` before use,
+  `Gpu::matmul_algo_config` reads an algorithm's tile, stages and split-K back, and
+  `Gpu::cublaslt_version` keys tune files. Plans share one 32 MiB workspace,
+  `MATMUL_WORKSPACE_BYTES`, and can be recorded in graphs. Matmul calls and
+  `Graph::launch` queue under one lock, so threads sharing a `Gpu` never interleave
+  one product's split-K kernels with another's. Buffers start on
+  `MATMUL_ALIGNMENT` (16-byte) boundaries, and the heuristic is asked for algorithms
+  that work at that alignment. Accumulation is FP32 for every output: a 16-bit output
+  allows only split-K reductions in FP32, and `matmul_plan_with` refuses a stored
+  algorithm that reduces in the output type
+- `Gpu::tune_matmul` and `Tuning`: time the heuristic's top candidates (8 by default)
+  and keep its first unless another is faster by over `margin` (1.05), with a
+  `TuneReport` of every timing. Refused with `Error::Capturing` during a capture
+- `MatmulCache`: one shared plan per `Matmul` for one `Gpu`, tuned or not. A plan
+  belongs to the `Gpu` that built it, and another GPU's `matmul` or cache refuses it
+- `Library::CublasLt` and `Error::CublasLt`. cuBLASLt opens through cudakit-cudarc's
+  loader, under the same versioned names as cuBLAS's own import of it, and its
+  symbols are checked like the other libraries'. A driver-only profile refuses it
+  before any lookup
+- serde for `Math`, `Operands`, `Output`, `Epilogue`, `Matmul`, `MatmulAlgo` and
+  `Tuning` under the `serde` feature
+
 ## 0.2.0
 
 Windows x86_64 support. CI builds and tests it, but nothing has run on a Windows GPU

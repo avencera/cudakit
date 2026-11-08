@@ -3,6 +3,8 @@ use std::fmt;
 #[cfg(feature = "libraries")]
 use cudarc::cublas::result::CublasError;
 #[cfg(feature = "libraries")]
+use cudarc::cublaslt::result::CublasError as LtError;
+#[cfg(feature = "libraries")]
 use cudarc::cudnn::CudnnError;
 use cudarc::driver::DriverError;
 
@@ -21,6 +23,8 @@ pub enum Library {
     Driver,
     /// cuBLAS
     Cublas,
+    /// cuBLASLt, cuBLAS's matmul library with explicit algorithm selection
+    CublasLt,
     /// cuDNN 9
     Cudnn,
     /// Runtime compilation, which cuDNN uses for some dynamic kernels
@@ -33,6 +37,7 @@ impl fmt::Display for Library {
             Self::Driver if cfg!(windows) => "CUDA driver (nvcuda.dll)",
             Self::Driver => "CUDA driver (libcuda)",
             Self::Cublas => "cuBLAS",
+            Self::CublasLt => "cuBLASLt",
             Self::Cudnn => "cuDNN",
             Self::Nvrtc => "NVRTC",
         })
@@ -58,6 +63,11 @@ impl Library {
                  absolute PATH entry, %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin \
                  (CUDA 12)"
             }
+            Self::CublasLt => {
+                "cudakit opens CUDA 12's cublasLt64_12.dll or CUDA 13's cublasLt64_13.dll from \
+                 the executable's directory, System32, an absolute PATH entry, \
+                 %CUDA_PATH%\\bin\\x64 (CUDA 13) or %CUDA_PATH%\\bin (CUDA 12)"
+            }
             Self::Cudnn => {
                 "cudakit opens cuDNN 9's cudnn64_9.dll from the executable's directory, System32, \
                  an absolute PATH entry, %CUDA_PATH%\\bin\\x64 or %CUDA_PATH%\\bin"
@@ -80,6 +90,10 @@ impl Library {
             Self::Cublas => {
                 "cudakit opens libcublas.so.12 or libcublas.so.13, or else a toolkit's \
                  unversioned libcublas.so, through LD_LIBRARY_PATH or the ldconfig cache"
+            }
+            Self::CublasLt => {
+                "cudakit opens libcublasLt.so.12 or libcublasLt.so.13, or else a toolkit's \
+                 unversioned libcublasLt.so, through LD_LIBRARY_PATH or the ldconfig cache"
             }
             Self::Cudnn => {
                 "cudakit opens libcudnn.so.9, or else an unversioned libcudnn.so, through \
@@ -202,6 +216,10 @@ pub enum Error {
     #[cfg(feature = "libraries")]
     #[error("cuBLAS: {0}")]
     Cublas(#[from] CublasError),
+    /// cuBLASLt returned an error
+    #[cfg(feature = "libraries")]
+    #[error("cuBLASLt: {0}")]
+    CublasLt(#[from] LtError),
     /// cuDNN returned an error
     #[cfg(feature = "libraries")]
     #[error("cuDNN: {0}")]
@@ -257,6 +275,15 @@ pub enum Error {
     /// A stream capture recorded no work
     #[error("CUDA graph capture recorded no work")]
     EmptyCapture,
+    /// Work that synchronizes or allocates was requested while the GPU's stream was
+    /// being captured into a graph
+    #[error(
+        "{operation} cannot run while the GPU's stream is being captured; do it before the capture, for example in an eager warm-up pass"
+    )]
+    Capturing {
+        /// What was refused
+        operation: &'static str,
+    },
     /// An operation was asked for a shape or option it does not support
     #[error("{context}: {reason}")]
     Unsupported {

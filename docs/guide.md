@@ -13,7 +13,7 @@ cuda = ["dep:cudakit", "cudakit/libraries"]         # library-first build
 cuda-sm75 = ["dep:cudakit", "dep:myapp-ptx-sm75"]   # one per tier you ship
 
 [dependencies]
-cudakit = { version = "0.2", optional = true }
+cudakit = { version = "0.3", optional = true }
 ```
 
 Enable cudakit only from your CUDA features, so CPU builds never compile cudarc.
@@ -46,7 +46,7 @@ pub static PROFILE: Profile = Profile {
 };
 ```
 
-`LibraryPolicy::DriverOnly` refuses every cuBLAS, cuDNN and NVRTC request before
+`LibraryPolicy::DriverOnly` refuses every cuBLAS, cuBLASLt, cuDNN and NVRTC request before
 anything is looked up, even when another crate in the binary enabled the `libraries`
 feature.
 
@@ -151,10 +151,77 @@ lengths. In a batch, a stride of 0 on `a` or `b` reuses one operand for every it
 output strides must not overlap. `Math` is exhaustive, so you can persist it in tuning
 keys and match it.
 
+`Sgemm` runs whatever algorithm cuBLAS picks, which comes from cuBLASLt's heuristic. On
+small or odd shapes that choice can leave much of a large GPU idle: on an RTX 5090,
+other candidates ran 32-row TF32 products 1.49x and 201-row ones 1.25x faster. A
+`MatmulPlan` fixes the algorithm instead, and runs bias, ReLU or GELU in the product's
+epilogue:
+
+```rust
+use cudakit::{Epilogue, Library, Matmul, MatmulCache, Operands, Output, Scale, Tuning};
+
+runtime.prepare(Library::CublasLt)?;            // at model load, never in capture
+
+// a BF16 `Linear` with a fused bias and GELU, written as BF16
+let spec = Matmul::linear(rows, outputs, inputs, Operands::Bf16)
+    .with_output(Output::Bf16)
+    .with_epilogue(Epilogue::GeluBias);
+
+// one plan per shape; with a tuning, a new shape times the heuristic's top 8 and
+// keeps its first unless another is over 5% faster
+let plans = MatmulCache::new(Some(Tuning::default()));
+let plan = plans.plan(&runtime, spec)?;
+runtime.matmul_bias(&plan, Scale::OVERWRITE, &x, &w, &bias, &mut y)?;
+```
+
+`a` and `b` hold the `Operands` type: `f32` for `F32(Math)` and `F32Fast16Bf`, `u16`
+bit patterns for `F16` and `Bf16`. `c` and the bias hold the `Output` type, FP32 by
+default; a 16-bit output needs operands of the same type, and cuBLASLt takes the bias in
+the output's type, so a BF16-output product needs a BF16 bias and a BF16 product with
+the default FP32 output an FP32 one. GELU is the tanh approximation.
+With TF32 operands on an RTX 5090, cuBLASLt ran GELU as the GEMM plus a separate
+epilogue kernel, while bias alone fused; check nsys before counting on GELU fusing.
+
+`with_strides` describes views with wider rows, such as one head's columns of a packed
+QKV buffer. A stride below the row length would make rows overlap, which cuBLASLt
+rejects, so cudakit refuses it with `Error::Unsupported`: express a sliding-window
+product (a 3×3 convolution as 3 matmuls over windows that slide by one row) as one
+product per tap instead. Every buffer must hold exactly its stored matrix,
+`(rows - 1) * stride + columns` elements, and start on a `MATMUL_ALIGNMENT` (16-byte)
+boundary, which whole allocations do; cudakit asks the heuristic only for algorithms
+that work at that alignment, so an offset view fails with `Error::Unsupported` where
+`Sgemm` would run. Buffers can be any cudarc `DevicePtr`, so memory from your own pool
+works through a small wrapper type.
+
+A fixed algorithm also fixes the summation order, and so the output bits. Tuning by
+timing picks per process, and the 5% margin keeps near-ties from flipping on noise,
+but a candidate near the margin can still win in one process and lose in the next.
+Where outputs must match across runs, persist the chosen algorithm, keyed on the device
+and `runtime.cublaslt_version()?`, and build from it:
+
+```rust
+let (plan, report) = runtime.tune_matmul(spec, &Tuning::default())?;
+store(spec, plan.algo());                       // `MatmulAlgo` is serde-able
+// at load: the stored algorithm, or the heuristic's first when it is rejected
+let plan = runtime.matmul_plan_with(spec, stored).or_else(|_| runtime.matmul_plan(spec))?;
+plans.insert(&runtime, plan)?;
+```
+
+Tuning runs every candidate on scratch buffers of constant values and synchronizes, so
+time it on an idle GPU, and never during a capture: `tune_matmul`, and a tuned
+`MatmulCache` meeting a new shape, fail with `Error::Capturing` there. Run the model
+once eagerly before capturing so every shape is cached. Plans hold host descriptors
+only, are `Send + Sync`, and may be recorded in a graph: every plan shares one
+workspace of `MATMUL_WORKSPACE_BYTES` (32 MiB) that lives as long as the `Gpu`. Matmul
+calls and `Graph::launch` queue under one lock, so threads sharing a `Gpu` can run
+products and replay graphs at once; launching a graph through `Graph::as_cuda` skips
+that lock.
+
 ## 6. Graphs
 
 ```rust
-// buffers allocated once; run eagerly first so cuBLAS finishes lazy setup
+// buffers allocated once; run eagerly first so cuBLAS finishes lazy setup and every
+// matmul shape is tuned
 encoder.enqueue(&runtime)?;
 // SAFETY: the encoder owns every captured buffer and never reallocates them, and the
 // graph is launched only while the encoder is alive

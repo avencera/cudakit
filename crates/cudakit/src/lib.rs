@@ -3,12 +3,12 @@
 //! cudakit loads the NVIDIA driver (`libcuda`) at run time through cudarc and never
 //! loads the CUDA Runtime (`libcudart`), so a build needs no CUDA toolkit and a
 //! process needs only the driver. With the `libraries` feature, and only when the
-//! consumer's [`Profile`] allows it, cuBLAS, cuDNN and NVRTC are loaded lazily, and
-//! used only after a symbol preflight of the loaded library.
+//! consumer's [`Profile`] allows it, cuBLAS, cuBLASLt, cuDNN and NVRTC are loaded
+//! lazily, and used only after a symbol preflight of the loaded library.
 //!
 //! It runs on Linux and Windows x86_64. On Windows the driver is `nvcuda.dll` from
-//! System32, and the libraries are CUDA 12's or 13's `cublas64_*.dll` and
-//! `nvrtc64_*0_0.dll` and cuDNN 9's `cudnn64_9.dll`, found in an absolute `PATH` entry
+//! System32, and the libraries are CUDA 12's or 13's `cublas64_*.dll`,
+//! `cublasLt64_*.dll` and `nvrtc64_*0_0.dll` and cuDNN 9's `cudnn64_9.dll`, found in an absolute `PATH` entry
 //! or `%CUDA_PATH%\bin\x64` and `%CUDA_PATH%\bin`, never in the current directory.
 //! CI builds and tests the Windows build, but it hasn't run on a GPU yet.
 //!
@@ -18,6 +18,10 @@
 //!   exact-architecture cubins, loaded by exact identity ([`ModuleRequest`])
 //! - [`DeviceTensor`] is a shaped device buffer
 //! - [`Sgemm`] and [`SgemmBatched`] describe row-major cuBLAS products
+//! - `MatmulPlan` runs a row-major cuBLASLt product with a fixed, persistable
+//!   algorithm, FP32, FP16 or BF16 operands and a fused bias, ReLU or GELU epilogue;
+//!   `Gpu::tune_matmul` times the heuristic's top candidates and `MatmulCache` keeps
+//!   one plan per shape (feature `libraries`)
 //! - [`Gpu::capture`] records stream work as a replayable [`Graph`]
 //! - `dnn` plans cuDNN convolutions (feature `libraries`)
 //! - [`identity`] reads the driver release for persisted tuning identities
@@ -39,6 +43,8 @@ mod graph;
 pub mod identity;
 #[cfg(feature = "libraries")]
 mod libraries;
+#[cfg(feature = "libraries")]
+mod matmul;
 mod profile;
 mod runtime;
 pub mod symbols;
@@ -58,7 +64,12 @@ pub use gemm::{Math, Sgemm, SgemmBatched};
 pub use gpu::Gpu;
 pub use graph::Graph;
 #[cfg(feature = "libraries")]
-pub use libraries::{BlasGuard, LibraryVersions};
+pub use libraries::{BlasGuard, LibraryVersions, MATMUL_WORKSPACE_BYTES};
+#[cfg(feature = "libraries")]
+pub use matmul::{
+    AlgoConfig, CandidateTiming, Epilogue, MATMUL_ALIGNMENT, Matmul, MatmulAlgo, MatmulCache,
+    MatmulCandidate, MatmulElement, MatmulPlan, Operands, Output, Scale, TuneReport, Tuning,
+};
 pub use profile::{ExtraSymbols, LibraryPolicy, Profile};
 pub use runtime::{LoadedKernels, Options, Runtime};
 pub use tensor::{DeviceTensor, unfold_windows};
