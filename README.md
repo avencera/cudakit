@@ -115,8 +115,10 @@ sysfs or procfs fallback.
 cudakit depends on `cudakit-cudarc`, a fork of cudarc 0.19.10 whose library is still
 named `cudarc`, and re-exports it as `cudakit::cudarc`. Besides the Windows rules above,
 it opens versioned Linux sonames (`libcublas.so.13`, `libcublas.so.12`) before a
-toolkit's unversioned `libcublas.so`, so a process never holds two copies of cuBLAS or
-pairs one install's cuBLAS with another's cuBLASLt. Reach cudarc through
+toolkit's unversioned `libcublas.so`, so cudakit does not load two copies of cuBLAS or
+pair one install's cuBLAS with another's cuBLASLt. That holds unless the host process
+already loaded another install's cuBLASLt by path: libcublas then binds that one, and the
+mismatched pair can fail its first GEMM. Reach cudarc through
 `cudakit::cudarc` rather than depending on upstream `cudarc` too: two copies of cudarc
 in one binary would each open their own libraries.
 

@@ -25,7 +25,7 @@ use cudarc::cublaslt::sys::{
     cublasLtMatrixLayout_t, cublasLtReductionScheme_t as Reduction, cublasStatus_t, cudaDataType,
 };
 use cudarc::driver::sys::CUevent_flags;
-use cudarc::driver::{DevicePtr, DevicePtrMut, DeviceRepr};
+use cudarc::driver::{CudaContext, DevicePtr, DevicePtrMut, DeviceRepr};
 use tracing::debug;
 
 use crate::error::check_len;
@@ -324,34 +324,38 @@ impl Matmul {
             )));
         }
 
-        let stored = |name: &'static str, rows: usize, cols: usize, stride: Option<usize>| {
-            let stride = stride.unwrap_or(cols);
-            if stride < cols {
-                return Err(refuse(format!(
-                    "{name}'s row stride {stride} is below its {cols} columns, so its rows \
+        let stored =
+            |name: &'static str, rows: usize, cols: usize, stride: Option<usize>, bytes: usize| {
+                let stride = stride.unwrap_or(cols);
+                if stride < cols {
+                    return Err(refuse(format!(
+                        "{name}'s row stride {stride} is below its {cols} columns, so its rows \
                      would overlap, which cuBLASLt rejects; use one product per row offset"
-                )));
-            }
-            let span = (rows - 1)
-                .checked_mul(stride)
-                .and_then(|start| start.checked_add(cols))
-                .ok_or(Error::DimensionOverflow {
-                    context: "matmul",
-                    value: stride,
-                })?;
-            Ok(Stored {
-                rows,
-                cols,
-                stride,
-                span,
-            })
-        };
+                    )));
+                }
+                // the span must also fit in bytes, since tuning allocates it as bytes
+                let span = (rows - 1)
+                    .checked_mul(stride)
+                    .and_then(|start| start.checked_add(cols))
+                    .filter(|span| span.checked_mul(bytes).is_some())
+                    .ok_or(Error::DimensionOverflow {
+                        context: "matmul",
+                        value: stride,
+                    })?;
+                Ok(Stored {
+                    rows,
+                    cols,
+                    stride,
+                    span,
+                })
+            };
         let a = if self.a_transposed { (k, m) } else { (m, k) };
         let b = if self.b_transposed { (n, k) } else { (k, n) };
+        let (operand, output) = (self.operands.element_bytes(), self.output.element_bytes());
         Ok([
-            stored("a", a.0, a.1, self.a_stride)?,
-            stored("b", b.0, b.1, self.b_stride)?,
-            stored("c", m, n, self.c_stride)?,
+            stored("a", a.0, a.1, self.a_stride, operand)?,
+            stored("b", b.0, b.1, self.b_stride, operand)?,
+            stored("c", m, n, self.c_stride, output)?,
         ])
     }
 }
@@ -686,6 +690,15 @@ struct Descriptors {
     second: Layout,
     c: Layout,
     geometry: [Stored; 3],
+    // bound in `drop` before the fields are destroyed, since a plan can drop on a
+    // thread where cudakit never made its context current
+    context: Arc<CudaContext>,
+}
+
+impl Drop for Descriptors {
+    fn drop(&mut self) {
+        let _ = self.context.bind_to_thread();
+    }
 }
 
 impl Descriptors {
@@ -693,7 +706,7 @@ impl Descriptors {
     /// `cᵀ = op(b)ᵀ · op(a)ᵀ` with `b` first, as [`Sgemm`](crate::Sgemm) does. A layout
     /// describes a matrix as stored: a row-major `r × c` buffer with row stride `s`
     /// read column-major is `c × r` with leading dimension `s`
-    fn new(spec: Matmul) -> Result<Self, Error> {
+    fn new(gpu: &Gpu, spec: Matmul) -> Result<Self, Error> {
         let geometry = spec.geometry()?;
         let [a, b, c] = geometry;
         let mut raw = std::ptr::null_mut();
@@ -771,6 +784,7 @@ impl Descriptors {
             c: layout(spec.output.data_type(), c)?,
             desc: Mutex::new(desc),
             geometry,
+            context: gpu.context().clone(),
         })
     }
 
@@ -784,9 +798,11 @@ impl Descriptors {
 /// [`Gpu::matmul_bias`]
 ///
 /// Building a plan only queries the library on the host, so it works during a graph
-/// capture; [`Gpu::tune_matmul`] does not. A plan holds only host descriptors, so it is
-/// cheap to keep one per shape, as [`MatmulCache`] does. It belongs to the [`Gpu`]
-/// whose heuristic chose its algorithm, and another GPU's [`Gpu::matmul`] refuses it
+/// capture; [`Gpu::tune_matmul`] does not. A plan holds host descriptors and a
+/// reference to its GPU's context, which it makes current before destroying them, so
+/// it is cheap to keep one per shape, as [`MatmulCache`] does, and may drop on any
+/// thread. It belongs to the [`Gpu`] whose heuristic chose its algorithm, and another
+/// GPU's [`Gpu::matmul`] refuses it
 pub struct MatmulPlan {
     owner: Owner,
     spec: Matmul,
@@ -959,7 +975,7 @@ impl Gpu {
         limit: usize,
     ) -> Result<Vec<MatmulCandidate>, Error> {
         let handle = self.lt()?;
-        let descriptors = Descriptors::new(spec)?;
+        let descriptors = Descriptors::new(self, spec)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1058,7 +1074,8 @@ impl Gpu {
         })
     }
 
-    /// A plan for `spec` with the heuristic's first algorithm, the one cuBLAS runs
+    /// A plan for `spec` with the heuristic's first algorithm under cudakit's alignment
+    /// and workspace limits, as [`Gpu::matmul_candidates`] lists it
     pub fn matmul_plan(&self, spec: Matmul) -> Result<MatmulPlan, Error> {
         let first = self.matmul_candidates(spec, 1)?;
         let candidate = first.first().ok_or_else(|| no_algorithm(spec))?;
@@ -1074,7 +1091,7 @@ impl Gpu {
     /// work at [`MATMUL_ALIGNMENT`]
     pub fn matmul_plan_with(&self, spec: Matmul, algo: MatmulAlgo) -> Result<MatmulPlan, Error> {
         let handle = self.lt()?;
-        let descriptors = Descriptors::new(spec)?;
+        let descriptors = Descriptors::new(self, spec)?;
         let raw = algo.to_sys();
         // zeroed: the check leaves the reserved bytes unwritten
         let mut result = MaybeUninit::<cublasLtMatmulHeuristicResult_t>::zeroed();
@@ -1200,9 +1217,10 @@ impl Gpu {
         candidates: &[MatmulCandidate],
     ) -> Result<Vec<Option<f32>>, Error> {
         self.lt()?;
-        let descriptors = Descriptors::new(spec)?;
+        let descriptors = Descriptors::new(self, spec)?;
         let [a, b, c] = descriptors.geometry;
         let stream = self.stream();
+        // geometry checked that each span, and so the bias's n, fits in bytes
         let filled = |elements: usize, bytes: usize, fill: Fill| {
             let mut buffer = stream.alloc_zeros::<u8>(elements * bytes)?;
             let (pointer, sync) = buffer.device_ptr_mut(stream);
@@ -1563,6 +1581,15 @@ mod tests {
             .geometry()
             .unwrap();
         assert_eq!((a.rows, a.cols, b.rows, b.cols), (4, 3, 2, 4));
+
+        // a and b span k elements, which fits in usize but not as FP32 bytes
+        let k = usize::MAX / 4 + 1;
+        assert!(matches!(
+            Matmul::new(1, 1, k, f32).geometry(),
+            Err(Error::DimensionOverflow { .. })
+        ));
+        let half = Matmul::new(1, 1, k, Operands::F16).with_output(Output::F16);
+        assert!(half.geometry().is_ok());
     }
 
     #[test]

@@ -177,7 +177,8 @@ runtime.matmul_bias(&plan, Scale::OVERWRITE, &x, &w, &bias, &mut y)?;
 `a` and `b` hold the `Operands` type: `f32` for `F32(Math)` and `F32Fast16Bf`, `u16`
 bit patterns for `F16` and `Bf16`. `c` and the bias hold the `Output` type, FP32 by
 default; a 16-bit output needs operands of the same type, and cuBLASLt takes the bias in
-the output's type, so a BF16 product needs a BF16 bias. GELU is the tanh approximation.
+the output's type, so a BF16-output product needs a BF16 bias and a BF16 product with
+the default FP32 output an FP32 one. GELU is the tanh approximation.
 With TF32 operands on an RTX 5090, cuBLASLt ran GELU as the GEMM plus a separate
 epilogue kernel, while bias alone fused; check nsys before counting on GELU fusing.
 
