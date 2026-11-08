@@ -338,9 +338,11 @@ impl Matmul {
                     .checked_mul(stride)
                     .and_then(|start| start.checked_add(cols))
                     .filter(|span| span.checked_mul(bytes).is_some())
-                    .ok_or(Error::DimensionOverflow {
-                        context: "matmul",
-                        value: stride,
+                    .ok_or_else(|| {
+                        refuse(format!(
+                            "{name}'s {rows} rows of {cols} {bytes}-byte elements, {stride} \
+                             apart, span more than usize::MAX bytes"
+                        ))
                     })?;
                 Ok(Stored {
                     rows,
@@ -1584,10 +1586,7 @@ mod tests {
 
         // a and b span k elements, which fits in usize but not as FP32 bytes
         let k = usize::MAX / 4 + 1;
-        assert!(matches!(
-            Matmul::new(1, 1, k, f32).geometry(),
-            Err(Error::DimensionOverflow { .. })
-        ));
+        unsupported(Matmul::new(1, 1, k, f32).geometry(), "usize::MAX bytes");
         let half = Matmul::new(1, 1, k, Operands::F16).with_output(Output::F16);
         assert!(half.geometry().is_ok());
     }
