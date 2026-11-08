@@ -1,4 +1,6 @@
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode, cuGraphGetNodes};
+use std::sync::{Arc, Mutex, PoisonError};
+
 use cudarc::driver::{CudaContext, CudaGraph};
 
 use crate::{Error, Gpu};
@@ -16,7 +18,7 @@ use crate::{Error, Gpu};
 ///
 /// `Send` but not `Sync`: driver graph handles work from any thread, but CUDA forbids
 /// using one executable graph from two threads at once
-pub struct Graph(CudaGraph);
+pub struct Graph(CudaGraph, Option<Arc<Mutex<()>>>);
 
 // SAFETY: the raw graph and executable handles are driver objects usable from any
 // thread, and cudarc's launch binds the graph's context first. Without `Sync`, only
@@ -31,12 +33,23 @@ impl std::fmt::Debug for Graph {
 
 impl Graph {
     /// Queues one replay on the stream it was captured from
+    ///
+    /// A replay can contain cuBLASLt products, which use the GPU's one matmul
+    /// workspace, so it queues under the same lock as an eager matmul and never lands
+    /// between another thread's split-K kernels and their reduction
     pub fn launch(&self) -> Result<(), Error> {
+        let _queue = self
+            .1
+            .as_ref()
+            .map(|queue| queue.lock().unwrap_or_else(PoisonError::into_inner));
         self.0.launch()?;
         Ok(())
     }
 
     /// The cudarc graph, for driver calls cudakit does not wrap
+    ///
+    /// Launching it through cudarc skips the matmul workspace lock that
+    /// [`Self::launch`] takes, so do that only while no other thread runs a matmul
     pub fn as_cuda(&self) -> &CudaGraph {
         &self.0
     }
@@ -71,6 +84,10 @@ impl Gpu {
     /// one allocated elsewhere. Buffers that `enqueue` allocates carry no events for
     /// their whole life, so they too stay on this stream
     ///
+    /// The graph may also use memory this `Gpu` owns, such as the shared cuBLASLt
+    /// workspace, so it must not be launched after the `Gpu` (or the `Runtime` holding
+    /// it) drops
+    ///
     /// No other thread may use this GPU until the capture returns: the stream records
     /// whatever any thread queues on it, so another thread's work would land in this
     /// graph with buffers the caller does not control
@@ -96,7 +113,13 @@ impl Gpu {
             return Ok(None);
         };
         // the driver ends an empty capture with a zero-node graph rather than none
-        Ok((node_count(&graph)? > 0).then_some(Graph(graph)))
+        // a library cannot be prepared during a capture, so a graph holds cuBLASLt work
+        // only if cuBLASLt was prepared before it began
+        #[cfg(feature = "libraries")]
+        let queue = self.libraries().lt_queue();
+        #[cfg(not(feature = "libraries"))]
+        let queue = None;
+        Ok((node_count(&graph)? > 0).then_some(Graph(graph, queue)))
     }
 
     /// Like [`Self::capture`], but an empty capture is [`Error::EmptyCapture`]

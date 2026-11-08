@@ -6,10 +6,11 @@ use crate::{Error, Library};
 /// Whether a consumer may load optional numerical libraries
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryPolicy {
-    /// Only the driver; every cuBLAS, cuDNN or NVRTC request fails with
+    /// Only the driver; every cuBLAS, cuBLASLt, cuDNN or NVRTC request fails with
     /// [`Error::LibraryForbidden`] before any lookup
     DriverOnly,
-    /// cuBLAS, cuDNN and NVRTC may be prepared when the `libraries` feature is on
+    /// cuBLAS, cuBLASLt, cuDNN and NVRTC may be prepared when the `libraries` feature
+    /// is on
     Allowed,
 }
 
@@ -240,7 +241,12 @@ mod tests {
     #[test]
     fn driver_only_forbids_every_optional_library_and_names_it() {
         let profile = profile(&[]);
-        for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
+        for library in [
+            Library::Cublas,
+            Library::CublasLt,
+            Library::Cudnn,
+            Library::Nvrtc,
+        ] {
             let error = profile.allow(library).unwrap_err();
             assert!(matches!(error, Error::LibraryForbidden { library: l } if l == library));
             assert!(error.to_string().contains(&library.to_string()));

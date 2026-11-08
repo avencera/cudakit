@@ -8,18 +8,22 @@ use std::thread::{self, ThreadId};
 use libloading::Library as SharedObject;
 
 use cudarc::cublas::{CudaBlas, result::CublasError};
+use cudarc::cublaslt::result::CublasError as LtError;
+use cudarc::cublaslt::sys::cublasLtHandle_t;
 use cudarc::cudnn::{Cudnn, CudnnError};
-use cudarc::driver::CudaStream;
+use cudarc::driver::{CudaSlice, CudaStream, DriverError};
 
 use crate::profile::Profile;
-use crate::symbols::{CUBLAS, CUDNN, NVRTC};
+use crate::symbols::{CUBLAS, CUBLASLT, CUDNN, NVRTC};
 use crate::{Error, Library, Math};
 
 #[derive(Debug, Clone)]
 enum Failure {
     Missing(Library),
     Blas(CublasError),
+    Lt(LtError),
     Dnn(CudnnError),
+    Driver(DriverError),
 }
 
 impl From<Failure> for Error {
@@ -27,7 +31,9 @@ impl From<Failure> for Error {
         match failure {
             Failure::Missing(library) => Self::LibraryUnavailable { library },
             Failure::Blas(error) => Self::Cublas(error),
+            Failure::Lt(error) => Self::CublasLt(error),
             Failure::Dnn(error) => Self::Cudnn(error),
+            Failure::Driver(error) => Self::Driver(error),
         }
     }
 }
@@ -37,6 +43,42 @@ struct Blas {
     handle: CudaBlas,
     // keep mode selection and enqueue in one critical section
     math: Mutex<Math>,
+}
+
+/// Bytes of the workspace every [`MatmulPlan`](crate::MatmulPlan) may use, the size
+/// NVIDIA recommends for Hopper and newer; split-K algorithms keep partial sums in it
+pub const MATMUL_WORKSPACE_BYTES: usize = 32 << 20;
+
+/// The shared cuBLASLt handle and the workspace its products use
+///
+/// One workspace serves every plan, and a captured graph keeps pointing at the same
+/// allocation. Products run in order on the GPU's stream, but one `cublasLtMatmul` can
+/// queue several kernels (a split-K product and its reduction), so two threads calling
+/// at once could interleave them and one reduction would read the other's partial
+/// sums. Every call therefore holds `queue` until it returns
+#[derive(Debug)]
+pub(crate) struct Lt {
+    pub(crate) handle: LtHandle,
+    pub(crate) workspace: CudaSlice<u8>,
+    pub(crate) queue: Arc<Mutex<()>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LtHandle(pub(crate) cublasLtHandle_t);
+
+// SAFETY: a cuBLASLt handle holds no per-thread state, and `cublasLtMatmul` may run on
+// one handle from several threads at once; cudakit never changes the handle after
+// creating it and binds the context before each call
+unsafe impl Send for LtHandle {}
+// SAFETY: see `Send`
+unsafe impl Sync for LtHandle {}
+
+impl Drop for LtHandle {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by `cublasLtCreate` and is destroyed once;
+        // `Gpu`'s drop binds the context first
+        let _ = unsafe { cudarc::cublaslt::result::destroy_handle(self.0) };
+    }
 }
 
 /// The shared cuDNN handle, bound to the thread that created it
@@ -91,11 +133,24 @@ pub struct LibraryVersions {
 #[derive(Debug, Default)]
 pub(crate) struct Libraries {
     blas: OnceLock<Result<Blas, Failure>>,
+    lt: OnceLock<Result<Lt, Failure>>,
     dnn: OnceLock<Result<Dnn, Failure>>,
     nvrtc: OnceLock<Result<(), Failure>>,
 }
 
 impl Libraries {
+    /// Whether `library` was already prepared, successfully or not, so preparing it
+    /// again only reads the cached result
+    pub(crate) fn is_prepared(&self, library: Library) -> bool {
+        match library {
+            Library::Cublas => self.blas.get().is_some(),
+            Library::CublasLt => self.lt.get().is_some(),
+            Library::Cudnn => self.dnn.get().is_some(),
+            Library::Nvrtc => self.nvrtc.get().is_some(),
+            Library::Driver => true,
+        }
+    }
+
     /// The policy check is deliberately before the cell lookup and every probe
     pub(crate) fn prepare(
         &self,
@@ -112,6 +167,22 @@ impl Libraries {
                 Ok(Blas {
                     handle,
                     math: Mutex::new(Math::Fp32),
+                })
+            }))
+            .map(|_| ()),
+            Library::CublasLt => cached(self.lt.get_or_init(|| {
+                present(profile, library)?;
+                // cuBLASLt ties a new handle to the current context, as cuBLAS does
+                stream.context().bind_to_thread().map_err(Failure::Driver)?;
+                let handle =
+                    LtHandle(cudarc::cublaslt::result::create_handle().map_err(Failure::Lt)?);
+                let workspace = stream
+                    .alloc_zeros::<u8>(MATMUL_WORKSPACE_BYTES)
+                    .map_err(Failure::Driver)?;
+                Ok(Lt {
+                    handle,
+                    workspace,
+                    queue: Arc::new(Mutex::new(())),
                 })
             }))
             .map(|_| ()),
@@ -159,6 +230,19 @@ impl Libraries {
         cached(value).map(|blas| &blas.handle)
     }
 
+    /// The prepared cuBLASLt handle and workspace
+    pub(crate) fn lt(&self) -> Result<&Lt, Error> {
+        cached(self.lt.get().ok_or(unprepared(Library::CublasLt))?)
+    }
+
+    /// The matmul workspace lock, for graphs that may replay cuBLASLt products
+    pub(crate) fn lt_queue(&self) -> Option<Arc<Mutex<()>>> {
+        match self.lt.get() {
+            Some(Ok(lt)) => Some(lt.queue.clone()),
+            _ => None,
+        }
+    }
+
     /// The shared cuDNN handle, only on the thread that prepared it
     pub(crate) fn dnn(&self) -> Result<&Arc<Cudnn>, Error> {
         let dnn = cached(self.dnn.get().ok_or(unprepared(Library::Cudnn))?)?;
@@ -202,6 +286,8 @@ fn present(profile: &Profile, library: Library) -> Result<(), Failure> {
     let extra = &profile.extra_symbols;
     let (base, extra) = match library {
         Library::Cublas => (CUBLAS, extra.cublas),
+        // consumers reach cuBLASLt only through plans, so it takes no extra symbols
+        Library::CublasLt => (CUBLASLT, &[][..]),
         Library::Cudnn => (CUDNN, extra.cudnn),
         Library::Nvrtc => (NVRTC, extra.nvrtc),
         Library::Driver => (&[][..], &[][..]),
@@ -212,13 +298,14 @@ fn present(profile: &Profile, library: Library) -> Result<(), Failure> {
 /// The file cudarc opened for `library`, which it keeps for the process and every later
 /// call uses, so the preflight checks exactly what cudarc runs
 fn opened(library: Library) -> Option<&'static SharedObject> {
-    use cudarc::{cublas, cudnn, driver, nvrtc};
+    use cudarc::{cublas, cublaslt, cudnn, driver, nvrtc};
 
     // SAFETY: CUDA library initializers have no caller preconditions, and `culib` only
     // returns the handle `is_culib_present` just opened
     unsafe {
         match library {
             Library::Cublas => cublas::sys::is_culib_present().then(|| cublas::sys::culib()),
+            Library::CublasLt => cublaslt::sys::is_culib_present().then(|| cublaslt::sys::culib()),
             Library::Cudnn => cudnn::sys::is_culib_present().then(|| cudnn::sys::culib()),
             Library::Nvrtc => nvrtc::sys::is_culib_present().then(|| nvrtc::sys::culib()),
             Library::Driver => driver::sys::is_culib_present().then(|| driver::sys::culib()),
@@ -329,10 +416,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn every_required_symbol_is_checked_before_cudarc_can_run() {
-        use crate::symbols::{CUBLAS, CUDNN, NVRTC};
+        use crate::symbols::{CUBLAS, CUBLASLT, CUDNN, NVRTC};
 
         for (library, symbols) in [
             (Library::Cublas, CUBLAS),
+            (Library::CublasLt, CUBLASLT),
             (Library::Cudnn, CUDNN),
             (Library::Nvrtc, NVRTC),
         ] {

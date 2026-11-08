@@ -60,8 +60,16 @@ fn a_driver_only_runtime_maps_no_cuda_library_but_the_driver() -> Result<(), Err
     }
 
     let runtime = Runtime::<AddOne>::open(0, Options::default())?;
-    for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
-        assert!(runtime.prepare(library).is_err());
+    for library in [
+        Library::Cublas,
+        Library::CublasLt,
+        Library::Cudnn,
+        Library::Nvrtc,
+    ] {
+        assert!(matches!(
+            runtime.prepare(library),
+            Err(Error::LibraryForbidden { library: refused }) if refused == library
+        ));
     }
 
     // the whole driver path: module load, launch, capture, replay and copies

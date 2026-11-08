@@ -134,11 +134,17 @@ impl Gpu {
     /// Loads and checks `library` and creates its handle on this stream
     ///
     /// Call it while building a plan, never during forward or graph capture. Fails with
-    /// [`Error::LibraryForbidden`] under a driver-only profile before any lookup
+    /// [`Error::LibraryForbidden`] under a driver-only profile before any lookup. The
+    /// first preparation allocates on the stream (cuBLASLt's workspace), so during a
+    /// capture of this GPU's stream it fails with [`Error::Capturing`]; preparing a
+    /// library again only reads the cached result and works anywhere
     pub fn prepare(&self, library: Library) -> Result<(), Error> {
         self.profile.allow(library)?;
         #[cfg(feature = "libraries")]
         {
+            if !self.libraries.is_prepared(library) {
+                self.refuse_while_capturing("preparing a library")?;
+            }
             self.libraries.prepare(self.profile, library, &self.stream)
         }
         #[cfg(not(feature = "libraries"))]
@@ -192,9 +198,20 @@ impl Gpu {
         Ok(dnn)
     }
 
+    /// The library cells, for cudakit's own wrappers in other modules
+    #[cfg(feature = "libraries")]
+    pub(crate) fn libraries(&self) -> &Libraries {
+        &self.libraries
+    }
+
     /// Prepares cuBLAS and cuDNN and reports their versions
+    ///
+    /// Like [`Gpu::prepare`], a first preparation fails with [`Error::Capturing`]
+    /// during a capture of this GPU's stream
     #[cfg(feature = "libraries")]
     pub fn library_versions(&self) -> Result<LibraryVersions, Error> {
+        self.prepare(Library::Cublas)?;
+        self.prepare(Library::Cudnn)?;
         self.context.bind_to_thread()?;
         self.libraries.versions(self.profile, &self.stream)
     }
@@ -318,6 +335,18 @@ impl Gpu {
                 debug!(?status, "Context SM limit unavailable");
                 Ok(SmLimit::Unknown)
             }
+        }
+    }
+
+    /// Fails with [`Error::Capturing`] while this GPU's stream is being captured, for
+    /// work that synchronizes or allocates and so must happen before a capture
+    #[cfg(feature = "libraries")]
+    pub(crate) fn refuse_while_capturing(&self, operation: &'static str) -> Result<(), Error> {
+        use cudarc::driver::sys::CUstreamCaptureStatus;
+
+        match self.stream.capture_status()? {
+            CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE => Ok(()),
+            _ => Err(Error::Capturing { operation }),
         }
     }
 

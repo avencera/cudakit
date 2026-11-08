@@ -1,5 +1,5 @@
 //! GPU checks of the shared host stack: module loading, graph capture, the cuBLAS
-//! products and cuDNN convolutions
+//! products and cuDNN convolutions; `tests/matmul.rs` checks the cuBLASLt plans
 //!
 //! The tests touch the device only with `CUDAKIT_REQUIRE_GPU=1`, which also makes a
 //! missing GPU a failure so a GPU runner cannot silently pass. Without it they skip,
@@ -9,7 +9,8 @@ use cudakit::cudarc::driver::{LaunchConfig, PushKernelArg};
 use cudakit::dnn::{ConvPlanner, Residual};
 use cudakit::{
     AreaPtx, Conv2d, Error, ExtraSymbols, Gpu, KernelArea, Library, LibraryPolicy, LoadedArtifact,
-    Math, ModuleRequest, Options, Profile, PtxTier, Runtime, Sgemm, SgemmBatched, TierSet,
+    Math, Matmul, ModuleRequest, Operands, Options, Profile, PtxTier, Runtime, Scale, Sgemm,
+    SgemmBatched, TierSet,
 };
 
 const BASE: Profile = Profile {
@@ -271,6 +272,7 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
         return Ok(());
     };
     runtime.prepare(Library::Cublas)?;
+    runtime.prepare(Library::CublasLt)?;
     let cudnn = match runtime.prepare(Library::Cudnn) {
         Ok(()) => true,
         Err(Error::LibraryUnavailable { .. }) => {
@@ -298,18 +300,26 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
     let (a, b) = (values(9, 5), values(9, 6));
     let (a_device, b_device) = (stream.clone_htod(&a)?, stream.clone_htod(&b)?);
     let mut c = stream.alloc_zeros::<f32>(9)?;
+    let plan = runtime.matmul_plan(Matmul::new(3, 3, 3, Operands::F32(Math::Fp32)))?;
+    let mut lt_c = stream.alloc_zeros::<f32>(9)?;
     // cudarc binds the context for neither a GEMM nor a cached kernel lookup, so each
     // runs first on its own fresh thread. The graph moves to a worker, since it is
     // `Send` but not `Sync`
     let shared = &runtime;
     let c_device = &mut c;
+    let lt_device = &mut lt_c;
+    let (a_lt, b_lt) = (&a_device, &b_device);
     std::thread::scope(|scope| {
         let lookup = scope.spawn(move || {
             shared.load_embedded(Area::AddOne)?.function("add_one")?;
             Ok::<_, Error>(())
         });
+        let matmul = scope.spawn(move || {
+            shared.matmul(&plan, Scale::OVERWRITE, a_lt, b_lt, lt_device)?;
+            Ok::<_, Error>(())
+        });
         let gemm = scope.spawn(move || {
-            shared.sgemm(spec, &a_device, &b_device, c_device)?;
+            shared.sgemm(spec, a_lt, b_lt, c_device)?;
             if cudnn {
                 assert!(matches!(
                     shared.dnn(),
@@ -323,17 +333,19 @@ fn a_shared_runtime_works_from_another_thread_and_keeps_cudnn_on_its_own() -> Re
             Ok::<_, Error>(())
         });
         lookup.join().expect("lookup thread panicked")?;
+        matmul.join().expect("matmul thread panicked")?;
         gemm.join().expect("gemm thread panicked")
     })?;
 
     assert_close(&stream.clone_dtoh(&c)?, &reference(spec, &a, &b));
+    assert_close(&stream.clone_dtoh(&lt_c)?, &reference(spec, &a, &b));
     assert!(stream.clone_dtoh(&data)?.iter().all(|value| *value == 1.0));
     if cudnn {
         runtime.dnn()?;
     }
 
     // the last handle to the libraries drops on a thread that never used the GPU
-    drop((function, data, c));
+    drop((function, data, c, lt_c, a_device, b_device));
     std::thread::spawn(move || drop(runtime))
         .join()
         .expect("drop thread panicked");
@@ -543,7 +555,12 @@ fn driver_only_profile_refuses_libraries_before_loading_them() -> Result<(), Err
     let Some(gpu) = opened(|| Gpu::open(0, &DRIVER_ONLY, None)) else {
         return Ok(());
     };
-    for library in [Library::Cublas, Library::Cudnn, Library::Nvrtc] {
+    for library in [
+        Library::Cublas,
+        Library::CublasLt,
+        Library::Cudnn,
+        Library::Nvrtc,
+    ] {
         assert!(matches!(
             gpu.prepare(library),
             Err(Error::LibraryForbidden { library: refused }) if refused == library
@@ -557,6 +574,12 @@ fn driver_only_profile_refuses_libraries_before_loading_them() -> Result<(), Err
         gpu.sgemm(Sgemm::new(2, 2, 2), &a, &a, &mut c),
         Err(Error::LibraryForbidden {
             library: Library::Cublas
+        })
+    ));
+    assert!(matches!(
+        gpu.matmul_candidates(Matmul::new(2, 2, 2, Operands::F32(Math::Fp32)), 1),
+        Err(Error::LibraryForbidden {
+            library: Library::CublasLt
         })
     ));
     gpu.prepare(Library::Driver)

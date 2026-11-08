@@ -20,7 +20,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # optional numerical libraries, loaded at run time after a symbol preflight; a consumer's
 # `Profile` still decides whether they may be requested
-libraries = ["cudarc/cublas", "cudarc/cudnn"]
+libraries = ["cudarc/cublas", "cudarc/cublaslt", "cudarc/cudnn"]
 # serde for identities that consumers persist, such as the driver release
 serde = ["dep:serde"]
 # constructors for host-only tests in consumers; never enable outside dev-dependencies
@@ -39,6 +39,14 @@ serde_json = "1"
 
 [[test]]
 name = "gpu"
+required-features = ["libraries", "test-support"]
+
+[[test]]
+name = "matmul"
+required-features = ["libraries", "test-support"]
+
+[[test]]
+name = "sonames"
 required-features = ["libraries", "test-support"]
 
 [[test]]

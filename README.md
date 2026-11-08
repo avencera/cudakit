@@ -7,8 +7,8 @@
 **A CUDA host stack that needs only the NVIDIA driver.** cudakit loads `libcuda`
 (`nvcuda.dll` on Windows) at run time and never links or loads the CUDA Runtime
 (`libcudart`). Building needs no CUDA
-toolkit, and running needs only the driver. cuBLAS and cuDNN are optional and also
-loaded at run time. Each one is loaded only when the application's policy allows it,
+toolkit, and running needs only the driver. cuBLAS, cuBLASLt and cuDNN are optional and
+also loaded at run time. Each one is loaded only when the application's policy allows it,
 and used only after a symbol check of the loaded library passes.
 
 cudakit is the shared GPU layer of [speakrs](https://github.com/avencera/speakrs)
@@ -27,6 +27,11 @@ exact-architecture cubins.
   driver-only or library use), checked when the GPU opens
 - `DeviceTensor`: a shaped device buffer
 - `Sgemm` and `SgemmBatched`: row-major cuBLAS products with length checks
+- `MatmulPlan`: a row-major cuBLASLt product with a fixed algorithm, FP32, FP16 or
+  BF16 operands, FP32 or 16-bit output, strided views and a fused bias, ReLU or GELU.
+  `Gpu::tune_matmul` times the heuristic's top candidates and keeps its first unless
+  another is clearly faster, `MatmulCache` keeps one plan per shape, and a chosen
+  `MatmulAlgo` can be persisted in a tune file
 - `Gpu::capture`: CUDA graph capture that pauses cudarc's event tracking and ends the
   capture even when the enqueue fails
 - `dnn`: a deterministic cuDNN convolution planner with fused bias, residual and ReLU
@@ -39,7 +44,7 @@ whichever thread calls it.
 
 ```toml
 [dependencies]
-cudakit = { version = "0.2", features = ["libraries"] }
+cudakit = { version = "0.3", features = ["libraries"] }
 ```
 
 ```rust
@@ -61,8 +66,8 @@ whole setup: the profile, kernel areas, threads, graphs and the kernel toolchain
 | Feature | Adds |
 | --- | --- |
 | (none) | Driver API only |
-| `libraries` | cuBLAS and cuDNN through cudarc, the symbol preflight, the GEMMs and `dnn` |
-| `serde` | serde for `identity::DriverRelease` |
+| `libraries` | cuBLAS, cuBLASLt and cuDNN through cudarc, the symbol preflight, the GEMMs, matmul plans and `dnn` |
+| `serde` | serde for `identity::DriverRelease`, `Math`, `Operands`, `Output`, `Epilogue`, `Matmul`, `MatmulAlgo` and `Tuning` |
 | `test-support` | Fixtures for host-only tests |
 
 Even with `libraries` enabled, a driver-only `Profile` refuses every library before
@@ -77,8 +82,8 @@ builds free of cudarc.
 - Linux, or Windows x86_64 (built and tested in CI, not yet run on a GPU), with an
   NVIDIA driver for CUDA 12.4 or newer
 - A GPU of compute capability 7.5 (Turing) or newer
-- For the `libraries` feature only: cuBLAS and cuDNN 9 (tested on Linux with CUDA 13
-  and cuDNN 9.27)
+- For the `libraries` feature only: cuBLAS and cuBLASLt 12 or 13 and cuDNN 9 (tested
+  on Linux with cuBLAS 13.0 and 13.4 and cuDNN 9.27)
 
 ### Windows
 
@@ -87,7 +92,8 @@ there, but nothing has run on a Windows GPU yet.
 
 The driver is `nvcuda.dll`, which the NVIDIA driver installs, and it loads only from
 System32. With the `libraries` feature, cudakit opens CUDA 12's or CUDA 13's cuBLAS
-(`cublas64_12.dll` or `cublas64_13.dll`, with the matching cuBLASLt beside it) and NVRTC
+(`cublas64_12.dll` or `cublas64_13.dll`, with the matching `cublasLt64_*.dll` beside
+it, which matmul plans also call) and NVRTC
 (`nvrtc64_120_0.dll` or `nvrtc64_130_0.dll`), and cuDNN 9's `cudnn64_9.dll`. It looks in
 the executable's directory and System32, then each absolute `PATH` entry, then
 `%CUDA_PATH%\bin\x64` (where CUDA 13 keeps its DLLs) and `%CUDA_PATH%\bin` (CUDA 12).
